@@ -13,10 +13,17 @@
 !Tests/**
 
 # Runtime scripts.
+!script/
+!script/*.sh
 !scripts/
 !scripts/*.js
 !scripts/*.py
 !scripts/*.sh
+
+# Codex app run actions.
+!.codex/
+!.codex/environments/
+!.codex/environments/environment.toml
 
 # Local/system/build noise.
 .DS_Store

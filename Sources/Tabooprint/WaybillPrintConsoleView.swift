@@ -17,7 +17,7 @@ struct WaybillPrintConsoleView: View {
         } content: {
             PrintWorkspaceContent(selection: sidebarSelection ?? .currentWaybill, model: model)
         } detail: {
-            PrintWorkspaceDetail(selection: sidebarSelection ?? .currentWaybill, model: model)
+            PrintPipelineInspector(model: model)
                 .navigationSplitViewColumnWidth(min: 360, ideal: 390, max: 440)
         }
         .frame(minWidth: 1240, minHeight: 780)
@@ -111,36 +111,78 @@ struct PrintSidebarView: View {
     @Binding var selection: PrintSidebarDestination?
 
     var body: some View {
-        List(selection: $selection) {
-            Section("打印") {
-                ForEach(PrintSidebarDestination.printItems) { item in
-                    SidebarRow(item: item)
-                        .tag(item as PrintSidebarDestination?)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                SidebarSection(title: "打印") {
+                    ForEach(PrintSidebarDestination.printItems) { item in
+                        SidebarActionRow(item: item, selection: $selection)
+                    }
                 }
-            }
 
-            Section("批量能力") {
-                ForEach(PrintSidebarDestination.batchItems) { item in
-                    if item.isImplemented {
-                        SidebarRow(item: item)
-                            .tag(item as PrintSidebarDestination?)
-                    } else {
-                        SidebarRow(item: item)
-                            .foregroundStyle(.secondary)
-                            .help("尚未实现")
+                SidebarSection(title: "批量能力") {
+                    ForEach(PrintSidebarDestination.batchItems) { item in
+                        SidebarActionRow(item: item, selection: $selection, isMuted: !item.isImplemented)
+                    }
+                }
+
+                SidebarSection(title: "说明") {
+                    ForEach(PrintSidebarDestination.infoItems) { item in
+                        SidebarActionRow(item: item, selection: $selection)
                     }
                 }
             }
-
-            Section("说明") {
-                ForEach(PrintSidebarDestination.infoItems) { item in
-                    SidebarRow(item: item)
-                        .tag(item as PrintSidebarDestination?)
-                }
-            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 18)
         }
-        .listStyle(.sidebar)
+        .background(Color(nsColor: .underPageBackgroundColor))
         .navigationTitle("工作台")
+    }
+}
+
+struct SidebarSection<Content: View>: View {
+    let title: String
+    let content: Content
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+
+            content
+        }
+    }
+}
+
+struct SidebarActionRow: View {
+    let item: PrintSidebarDestination
+    @Binding var selection: PrintSidebarDestination?
+    var isMuted = false
+
+    private var isSelected: Bool {
+        selection == item
+    }
+
+    var body: some View {
+        Button {
+            selection = item
+        } label: {
+            SidebarRow(item: item)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isMuted && !isSelected ? .secondary : .primary)
+        .background(isSelected ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .help(isMuted ? "尚未实现" : item.title)
     }
 }
 
@@ -161,435 +203,159 @@ struct PrintWorkspaceContent: View {
         case .currentWaybill:
             LabelPreviewWorkspace(document: .sample)
         case .printQueue:
-            PrintQueueWorkspace(jobs: model.printJobs)
+            SidebarPage(
+                title: "打印队列",
+                subtitle: model.printJobs.isEmpty ? "等待新的打印 payload。" : "最近 \(model.printJobs.count) 个打印任务。",
+                systemImage: "tray.full"
+            ) {
+                RecentJobsCard(jobs: model.printJobs)
+            }
         case .recentTasks:
-            RecentTasksWorkspace(model: model)
+            SidebarPage(
+                title: "最近任务",
+                subtitle: "最后刷新：\(model.lastRefreshedText)",
+                systemImage: "clock"
+            ) {
+                RecentTasksCard(tasks: model.recentTasks)
+            }
         case .payloadDocuments:
-            PayloadDocumentsWorkspace(tasks: model.recentTasks)
+            SidebarPage(
+                title: "Payload 多文档",
+                subtitle: "当前支持 payload 内多个 documents。",
+                systemImage: "doc.on.doc"
+            ) {
+                PayloadDocumentsCard(tasks: model.recentTasks)
+            }
         case .currentVersion:
-            VersionWorkspace(model: model)
+            SidebarPage(
+                title: "当前版本",
+                subtitle: "Tabooprint 本地运行信息。",
+                systemImage: "info.circle"
+            ) {
+                VersionSummaryCard(model: model)
+            }
         case .csvImport, .fieldMapping, .retryFailed:
-            PlaceholderWorkspace(title: selection.title, systemImage: selection.systemImage)
-        }
-    }
-}
-
-struct PrintWorkspaceDetail: View {
-    let selection: PrintSidebarDestination
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        switch selection {
-        case .currentVersion:
-            VersionDetail(model: model)
-        case .currentWaybill, .printQueue, .recentTasks, .payloadDocuments, .csvImport, .fieldMapping, .retryFailed:
-            PrintPipelineInspector(model: model)
-        }
-    }
-}
-
-struct PrintQueueWorkspace: View {
-    let jobs: [PrintJob]
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                WorkspaceHeader(
-                    title: "打印队列",
-                    subtitle: jobs.isEmpty ? "等待新的打印 payload。" : "最近 \(jobs.count) 个打印任务。",
-                    systemImage: "tray.full"
-                )
-
-                if jobs.isEmpty {
-                    PlaceholderPanel(
-                        title: "暂无任务",
-                        subtitle: "千牛提交面单后，这里会显示 PDF、打印机和 lpr 状态。",
-                        systemImage: "tray"
-                    )
-                } else {
-                    VStack(spacing: 10) {
-                        ForEach(jobs) { job in
-                            PrintQueueRow(job: job)
-                        }
-                    }
+            SidebarPage(
+                title: selection.title,
+                subtitle: "尚未接入当前版本。",
+                systemImage: selection.systemImage
+            ) {
+                SettingsCard(title: "未实现", subtitle: "这个入口已预留，后续实现后再启用。") {
+                    EmptyView()
                 }
             }
-            .padding(24)
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .navigationTitle("打印队列")
-    }
-}
-
-struct PrintQueueRow: View {
-    let job: PrintJob
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top) {
-                Label(job.waybillCode, systemImage: job.status.systemImage)
-                    .font(.headline)
-                    .foregroundStyle(job.status.color)
-
-                Spacer()
-
-                StatusText(text: job.status.rawValue, color: job.status.color)
-            }
-
-            HStack(spacing: 16) {
-                QueueMetaItem(title: "打印机", value: job.printerName)
-                QueueMetaItem(title: "PDF", value: job.pdfPath.isEmpty ? "-" : job.pdfPath)
-            }
-
-            if let commandText = job.commandText, !commandText.isEmpty {
-                Text(commandText)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-
-            if let errorMessage = job.errorMessage {
-                Text(errorMessage)
-                    .font(.caption)
-                    .foregroundStyle(job.status == .failed ? .red : .secondary)
-            }
-        }
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.primary.opacity(0.08))
         }
     }
 }
 
-struct QueueMetaItem: View {
+struct SidebarPage<Content: View>: View {
     let title: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
-            Text(value)
-                .font(.system(.caption, design: .monospaced).weight(.semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-struct RecentTasksWorkspace: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                WorkspaceHeader(
-                    title: "最近任务",
-                    subtitle: "最后刷新：\(model.lastRefreshedText)",
-                    systemImage: "clock"
-                )
-
-                if model.recentTasks.isEmpty {
-                    PlaceholderPanel(
-                        title: "暂无任务",
-                        subtitle: "收到浏览器请求后会显示 requestID、命令、文档数和结果。",
-                        systemImage: "clock"
-                    )
-                } else {
-                    VStack(spacing: 10) {
-                        ForEach(model.recentTasks) { task in
-                            RecentTaskRow(task: task)
-                        }
-                    }
-                }
-
-                LogPanel(logs: model.redactedLogs, clear: model.clearLogViewer)
-            }
-            .padding(24)
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .navigationTitle("最近任务")
-    }
-}
-
-struct RecentTaskRow: View {
-    let task: RecentTask
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(task.command)
-                        .font(.headline)
-
-                    Text(task.requestID)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                StatusText(text: task.resultDisplay, color: task.isInProgress ? .orange : .green)
-            }
-
-            HStack(spacing: 10) {
-                StatusText(text: task.modeDisplay, color: .secondary)
-                StatusText(text: "\(task.documentCountText) 个文档", color: .secondary)
-                Text(task.timestampText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-        }
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.primary.opacity(0.08))
-        }
-    }
-}
-
-struct LogPanel: View {
-    let logs: String
-    let clear: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("日志")
-                    .font(.headline)
-
-                Spacer()
-
-                Button(action: clear) {
-                    Label("清空", systemImage: "trash")
-                }
-                .disabled(logs.isEmpty)
-            }
-
-            Text(logs.isEmpty ? "暂无日志" : logs)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(logs.isEmpty ? .secondary : .primary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, minHeight: 140, alignment: .topLeading)
-                .padding(12)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        }
-        .padding(16)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.primary.opacity(0.08))
-        }
-    }
-}
-
-struct PayloadDocumentsWorkspace: View {
-    let tasks: [RecentTask]
-
-    private var latestDocumentCount: Int {
-        tasks.first?.documentCount ?? 0
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                WorkspaceHeader(
-                    title: "Payload 多文档",
-                    subtitle: latestDocumentCount > 0 ? "最近 payload 包含 \(latestDocumentCount) 个文档。" : "等待 payload。",
-                    systemImage: "doc.on.doc"
-                )
-
-                VStack(alignment: .leading, spacing: 12) {
-                    CapabilityRow(title: "解析 documents", value: "已接入")
-                    CapabilityRow(title: "批量渲染 PDF", value: "已接入")
-                    CapabilityRow(title: "CSV / Excel 导入", value: "未接入")
-                    CapabilityRow(title: "失败重试", value: "未接入")
-                }
-                .padding(16)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-            .padding(24)
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .navigationTitle("Payload 多文档")
-    }
-}
-
-struct CapabilityRow: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        HStack {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-
-            Spacer()
-
-            Text(value)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(value == "已接入" ? .green : .secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background((value == "已接入" ? Color.green : Color.secondary).opacity(0.12), in: Capsule())
-        }
-    }
-}
-
-struct VersionWorkspace: View {
-    @ObservedObject var model: AppModel
-
-    private var versionText: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "本地开发版"
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                WorkspaceHeader(
-                    title: "Tabooprint",
-                    subtitle: versionText,
-                    systemImage: "printer.fill"
-                )
-
-                VStack(alignment: .leading, spacing: 12) {
-                    VersionRow(title: "服务状态", value: model.serviceState.title)
-                    VersionRow(title: "服务摘要", value: model.serviceSummary)
-                    VersionRow(title: "浏览器连接", value: "\(model.activeBrowserConnections)")
-                    VersionRow(title: "最新预览", value: model.latestPreviewPDF?.path ?? "-")
-                }
-                .padding(16)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-            .padding(24)
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .navigationTitle("当前版本")
-    }
-}
-
-struct VersionRow: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text(value)
-                .font(.system(.subheadline, design: title == "最新预览" ? .monospaced : .default).weight(.semibold))
-                .lineLimit(2)
-                .truncationMode(.middle)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-struct VersionDetail: View {
-    @ObservedObject var model: AppModel
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                SettingsCard(title: "运行状态", subtitle: "当前本机服务。") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        DedupKeyRow("WebSocket：\(portText(for: 13528))")
-                        DedupKeyRow("HTTP 预览：\(portText(for: 13525))")
-                        DedupKeyRow("打印机：\(model.printerDevices.map(\.displayName).joined(separator: ", "))")
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-            .padding(18)
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-        .navigationTitle("版本信息")
-    }
-
-    private func portText(for port: Int) -> String {
-        guard let status = model.ports.first(where: { $0.port == port }) else {
-            return "未检测"
-        }
-        return "\(port) \(status.stateText)"
-    }
-}
-
-struct PlaceholderWorkspace: View {
-    let title: String
+    let subtitle: String
     let systemImage: String
+    let content: Content
+
+    init(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.systemImage = systemImage
+        self.content = content()
+    }
 
     var body: some View {
-        VStack {
-            PlaceholderPanel(title: title, subtitle: "尚未接入当前版本。", systemImage: systemImage)
-                .frame(maxWidth: 360)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: systemImage)
+                        .font(.title2)
+                        .foregroundStyle(.tint)
+                        .frame(width: 34, height: 34)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title)
+                            .font(.title2.weight(.semibold))
+
+                        Text(subtitle)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+                }
+
+                content
+            }
+            .padding(24)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle(title)
     }
 }
 
-struct PlaceholderPanel: View {
-    let title: String
-    let subtitle: String
-    let systemImage: String
+struct RecentTasksCard: View {
+    let tasks: [RecentTask]
 
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: systemImage)
-                .font(.system(size: 32))
-                .foregroundStyle(.secondary)
+        SettingsCard(title: "最近任务", subtitle: "浏览器请求和处理结果。") {
+            if tasks.isEmpty {
+                Label("暂无任务", systemImage: "clock")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(tasks) { task in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(task.command)
+                                    .font(.subheadline.weight(.semibold))
 
-            Text(title)
-                .font(.headline)
+                                Text(task.requestID)
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
 
-            Text(subtitle)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(22)
-        .frame(maxWidth: .infinity)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.primary.opacity(0.08))
+                            Spacer()
+
+                            StatusText(text: task.resultDisplay, color: task.isInProgress ? .orange : .green)
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
-struct WorkspaceHeader: View {
-    let title: String
-    let subtitle: String
-    let systemImage: String
+struct PayloadDocumentsCard: View {
+    let tasks: [RecentTask]
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: systemImage)
-                .font(.title2)
-                .foregroundStyle(.tint)
-                .frame(width: 34, height: 34)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.title2.weight(.semibold))
-
-                Text(subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+        SettingsCard(title: "支持范围", subtitle: "当前 payload 能力。") {
+            VStack(alignment: .leading, spacing: 9) {
+                DedupKeyRow("payload 内多个 documents")
+                DedupKeyRow("多文档逐个渲染 PDF")
+                DedupKeyRow("最近文档数：\(tasks.first?.documentCountText ?? "0")")
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
 
-            Spacer()
+struct VersionSummaryCard: View {
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        SettingsCard(title: "运行状态", subtitle: "当前本机服务。") {
+            VStack(alignment: .leading, spacing: 9) {
+                DedupKeyRow("服务：\(model.serviceState.title)")
+                DedupKeyRow("连接：\(model.activeBrowserConnections)")
+                DedupKeyRow("最新预览：\(model.latestPreviewPDF?.lastPathComponent ?? "-")")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
