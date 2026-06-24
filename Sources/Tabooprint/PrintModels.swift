@@ -10,7 +10,7 @@ enum WaybillLabelSpec {
 }
 
 enum PrintMode: String, CaseIterable, Identifiable {
-    case dryRun = "Dry-run"
+    case dryRun = "模拟打印"
     case realPrint = "真实打印"
 
     var id: String { rawValue }
@@ -26,7 +26,7 @@ enum PrintMode: String, CaseIterable, Identifiable {
 
 enum PrintJobStatus: String {
     case pending = "待打印"
-    case dryRun = "Dry-run"
+    case dryRun = "模拟打印"
     case submitted = "已提交"
     case skippedDuplicate = "已跳过重复"
     case failed = "失败"
@@ -120,24 +120,24 @@ struct PrintJob: Identifiable {
 
 extension WaybillDocument {
     static let sample = WaybillDocument(
-        waybillCode: "YT1234567890123",
-        documentID: "DOC-20260624-0001",
-        receiverName: "李明",
-        receiverPhone: "138****2468",
-        receiverAddress: "浙江省杭州市余杭区文一西路 969 号未来科技城 3 号楼 1206",
-        senderName: "淘宝商家",
-        senderPhone: "0571****8888",
-        senderAddress: "浙江省杭州市滨江区网商路 699 号",
-        sortingCode: "杭A-07",
-        consolidationInfo: "杭州集包",
-        blockCode: "HZ-XN-03",
+        waybillCode: "90000000000001",
+        documentID: "DEMO-DOC-0001",
+        receiverName: "演示收件人",
+        receiverPhone: "188****0001",
+        receiverAddress: "示例省示例市示例区演示街道 100 号虚拟收货地址",
+        senderName: "演示寄件人",
+        senderPhone: "199****0002",
+        senderAddress: "示例省样板市样板区测试路 200 号虚拟发货仓",
+        sortingCode: "DEMO-A01",
+        consolidationInfo: "演示集包地",
+        blockCode: "演示路由",
         packageIndexText: "第 1/1 个",
-        itemInfo: "蓝牙标签打印机配件套装",
-        itemTotalCount: "1",
-        orderID: "ORDER-883920194",
-        buyerNick: "mango_2026",
-        buyerMemo: "请尽快发货",
-        sellerMemo: "已核对地址",
+        itemInfo: "演示商品 A；虚拟规格 B；样例配件套装",
+        itemTotalCount: "2 件",
+        orderID: "DEMO-ORDER-20260625-0001",
+        buyerNick: "demo_buyer",
+        buyerMemo: "演示买家备注",
+        sellerMemo: "演示卖家备注",
         printedAt: .now
     )
 }

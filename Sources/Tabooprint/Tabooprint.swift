@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @main
@@ -9,11 +10,22 @@ struct TabooprintApp {
             return
         }
 
+        configureDesktopRuntime()
+
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate
         application.setActivationPolicy(.accessory)
         application.run()
+    }
+
+    private static func configureDesktopRuntime() {
+        NSWindow.allowsAutomaticWindowTabbing = false
+
+        guard ProcessInfo.processInfo.environment["TABOOPRINT_SHOW_SYSTEM_STDERR"] != "1" else {
+            return
+        }
+        freopen("/dev/null", "w", stderr)
     }
 }
 

@@ -88,6 +88,8 @@ struct WaybillCanvas: View {
                 BottomBarcodeBlock(document: document)
             }
             .padding(18)
+            .foregroundStyle(Color.black)
+            .tint(Color.black)
 
             RotatedWaybillText(text: document.waybillCode)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -100,6 +102,7 @@ struct WaybillCanvas: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.black.opacity(0.06))
         }
+        .environment(\.colorScheme, .light)
     }
 }
 
@@ -115,7 +118,7 @@ struct HeaderBlock: View {
 
                     Text("打印时间 \(document.printedAt.formatted(date: .numeric, time: .shortened))")
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.black.opacity(0.58))
                 }
 
                 Spacer()
@@ -180,7 +183,7 @@ struct AddressRow: View {
 
                     Text(phone)
                         .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.black.opacity(0.58))
                 }
 
                 Text(address)
@@ -202,7 +205,7 @@ struct RouteBlock: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("大头笔 / 分拣码")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.black.opacity(0.58))
 
                 Text(document.sortingCode)
                     .font(.system(size: 38, weight: .bold, design: .rounded))
@@ -214,14 +217,14 @@ struct RouteBlock: View {
             VStack(alignment: .trailing, spacing: 5) {
                 Text("集包地")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.black.opacity(0.58))
 
                 Text(document.consolidationInfo)
                     .font(.caption.weight(.semibold))
 
                 Text("路由码 \(document.blockCode)")
                     .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.black.opacity(0.58))
             }
         }
         .padding(.vertical, 12)
@@ -252,7 +255,7 @@ struct InfoLine: View {
         HStack(alignment: .firstTextBaseline) {
             Text(label)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.black.opacity(0.58))
                 .frame(width: 56, alignment: .leading)
 
             Text(value.isEmpty ? "-" : value)
@@ -274,7 +277,7 @@ struct BottomBarcodeBlock: View {
 
             Text(document.waybillCode)
                 .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.black.opacity(0.58))
         }
         .padding(.top, 10)
     }
@@ -286,7 +289,7 @@ struct RotatedWaybillText: View {
     var body: some View {
         Text(text)
             .font(.system(.caption2, design: .monospaced).weight(.semibold))
-            .foregroundStyle(.secondary.opacity(0.72))
+            .foregroundStyle(Color.black.opacity(0.42))
             .rotationEffect(.degrees(-90))
             .padding(.horizontal, -26)
     }
@@ -302,7 +305,7 @@ struct MainBarcodeView: View {
 
             Text("Code128 · 运单号主条码")
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.black.opacity(0.58))
         }
         .accessibilityLabel("Code128 主条码，内容 \(code)")
     }

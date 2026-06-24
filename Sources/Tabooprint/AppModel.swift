@@ -104,7 +104,7 @@ struct RecentTask: Identifiable {
         case "respect-preview-flag": return "尊重 preview"
         case "failure-document-not-found": return "缺文档失败"
         case "failure-decrypt": return "解密失败"
-        case "physical-dry-run": return "打印 dry-run"
+        case "physical-dry-run": return "模拟打印"
         case "physical-print": return "真实打印"
         case "physical-duplicate-suppressed": return "重复跳过"
         default: return mode
@@ -116,7 +116,7 @@ struct RecentTask: Identifiable {
         switch result {
         case "preview": return "预览成功"
         case "notifyPrintResult": return "物理打印"
-        case "physical-dry-run": return "打印 dry-run"
+        case "physical-dry-run": return "模拟打印"
         case "physical-print": return "真实打印"
         case "physical-duplicate-suppressed": return "重复跳过"
         case "physical-print-failed": return "打印失败"
@@ -245,7 +245,7 @@ final class AppModel: NSObject, ObservableObject {
 
         serviceState = action == .stop ? .stopping : .starting
         let dedupeText = printSettings.dedupe ? "去重 \(printSettings.dedupeWindowMinutes) 分钟" : "去重关闭"
-        serviceSummary = "\(serviceState.title) • \(runtimeMode.title) • \(printSettings.dryRun ? "dry-run" : "真实打印") • \(dedupeText)"
+        serviceSummary = "\(serviceState.title) • \(runtimeMode.title) • \(printSettings.dryRun ? "模拟打印" : "真实打印") • \(dedupeText)"
 
         let configuration = PrintServiceConfiguration.current(
             runtimeMode: runtimeMode,
