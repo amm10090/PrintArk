@@ -1,18 +1,24 @@
+import PDFKit
 import SwiftUI
 
 struct LabelPreviewWorkspace: View {
-    let document: WaybillDocument
+    let pdfURL: URL?
 
     var body: some View {
         ZStack {
             Color(nsColor: .windowBackgroundColor)
 
             VStack(spacing: 18) {
-                PreviewHeader()
+                PreviewHeader(pdfURL: pdfURL)
 
                 ScrollView {
                     VStack(spacing: 18) {
-                        WaybillCanvas(document: document)
+                        if let pdfURL {
+                            WaybillPDFCanvas(url: pdfURL)
+                        } else {
+                            EmptyPreviewState()
+                        }
+
                         TechnicalSpecStrip()
                     }
                     .padding(.vertical, 24)
@@ -25,13 +31,15 @@ struct LabelPreviewWorkspace: View {
 }
 
 struct PreviewHeader: View {
+    let pdfURL: URL?
+
     var body: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("\(WaybillLabelSpec.sizeText) 面单预览")
                     .font(.title2.weight(.semibold))
 
-                Text("渲染尺寸 \(WaybillLabelSpec.renderSizeText)，PX_PER_MM = \(WaybillLabelSpec.pixelsPerMillimeterText)，当前精度约 \(WaybillLabelSpec.dpiText)。")
+                Text(pdfURL?.lastPathComponent ?? "暂无预览 PDF")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -40,7 +48,7 @@ struct PreviewHeader: View {
 
             HStack(spacing: 8) {
                 SpecPill(text: "竖向")
-                SpecPill(text: "Code128")
+                SpecPill(text: "PDF")
                 SpecPill(text: "fit-to-page")
             }
         }
@@ -56,6 +64,77 @@ struct SpecPill: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(.thinMaterial, in: Capsule())
+    }
+}
+
+struct WaybillPDFCanvas: View {
+    let url: URL
+
+    var body: some View {
+        PDFPreviewView(url: url)
+            .frame(width: 370, height: 630)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.black.opacity(0.06))
+            }
+            .shadow(color: .black.opacity(0.16), radius: 32, x: 0, y: 18)
+    }
+}
+
+struct EmptyPreviewState: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 38, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Text("暂无预览 PDF")
+                .font(.headline.weight(.semibold))
+
+            Text("收到打印 payload 后会显示最新面单。")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 370, height: 630)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.black.opacity(0.06))
+        }
+    }
+}
+
+struct PDFPreviewView: NSViewRepresentable {
+    let url: URL
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePage
+        view.displayDirection = .vertical
+        view.displaysPageBreaks = false
+        view.backgroundColor = .clear
+        return view
+    }
+
+    func updateNSView(_ view: PDFView, context: Context) {
+        guard context.coordinator.currentURL != url else {
+            view.autoScales = true
+            return
+        }
+
+        view.document = PDFDocument(url: url)
+        view.autoScales = true
+        context.coordinator.currentURL = url
+    }
+
+    final class Coordinator {
+        var currentURL: URL?
     }
 }
 

@@ -35,6 +35,8 @@ struct PrintPipelineInspector: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
+                ServiceControlsCard(model: model, printDryRun: printDryRun)
+
                 PipelineSettingsCard(
                     selectedPrinter: selectedPrinter,
                     printerName: $printerName,
@@ -62,6 +64,45 @@ struct PrintPipelineInspector: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("打印设置")
+    }
+}
+
+struct ServiceControlsCard: View {
+    @ObservedObject var model: AppModel
+    let printDryRun: Bool
+
+    var body: some View {
+        SettingsCard(title: "本机服务", subtitle: model.serviceSummary) {
+            VStack(spacing: 12) {
+                HStack {
+                    PipelineStateBadge(state: model.serviceState)
+
+                    Spacer()
+
+                    Button(action: model.refresh) {
+                        Label("刷新", systemImage: "arrow.clockwise")
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Button(action: model.restartService) {
+                        Label(printDryRun ? "启动模拟打印" : "启动真实打印", systemImage: "paperplane.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button(action: model.stopService) {
+                        Label("停止", systemImage: "stop.fill")
+                    }
+                    .disabled(model.serviceState == .stopped || model.serviceState == .stopping)
+
+                    Button(action: model.openLatestPreview) {
+                        Label("打开最新预览", systemImage: "doc.richtext")
+                    }
+                    .disabled(model.latestPreviewPDF == nil)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 }
 

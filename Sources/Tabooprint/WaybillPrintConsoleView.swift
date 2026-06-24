@@ -201,7 +201,7 @@ struct PrintWorkspaceContent: View {
     var body: some View {
         switch selection {
         case .currentWaybill:
-            LabelPreviewWorkspace(document: .sample)
+            LabelPreviewWorkspace(pdfURL: model.latestPreviewPDF)
         case .printQueue:
             SidebarPage(
                 title: "打印队列",
