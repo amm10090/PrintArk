@@ -64,11 +64,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        let hostingController = NSHostingController(rootView: SettingsView(model: model))
+        let hostingController = NSHostingController(rootView: WaybillPrintConsoleView(model: model))
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Tabooprint"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: 1040, height: 760))
+        window.setContentSize(NSSize(width: 1240, height: 780))
         window.center()
         window.isReleasedWhenClosed = false
         window.delegate = self

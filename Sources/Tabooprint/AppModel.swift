@@ -7,6 +7,9 @@ enum SettingsKeys {
     static let printerName = "tabooprint.printerName"
     static let printMedia = "tabooprint.printMedia"
     static let printDryRun = "tabooprint.printDryRun"
+    static let printFitToPage = "tabooprint.printFitToPage"
+    static let printDedupe = "tabooprint.printDedupe"
+    static let dedupeWindowMinutes = "tabooprint.dedupeWindowMinutes"
 }
 
 enum RuntimeMode: String, CaseIterable, Identifiable {
@@ -116,6 +119,7 @@ struct RecentTask: Identifiable {
         case "failure-decrypt": return "解密失败"
         case "physical-dry-run": return "打印 dry-run"
         case "physical-print": return "真实打印"
+        case "physical-duplicate-suppressed": return "重复跳过"
         default: return mode
         }
     }
@@ -127,6 +131,7 @@ struct RecentTask: Identifiable {
         case "notifyPrintResult": return "物理打印"
         case "physical-dry-run": return "打印 dry-run"
         case "physical-print": return "真实打印"
+        case "physical-duplicate-suppressed": return "重复跳过"
         case "physical-print-failed": return "打印失败"
         case "document-not-found": return "文档缺失"
         case "decrypt-failure": return "解密失败"
@@ -144,6 +149,8 @@ struct SupervisorSnapshot {
     let ports: [PortStatus]
     let activeBrowserConnections: Int
     let recentTasks: [RecentTask]
+    let printJobs: [PrintJob]
+    let printerDevices: [PrinterDevice]
     let rawLogLines: [String]
     let latestPreviewPDF: URL?
     let pidIsAlive: Bool
@@ -158,11 +165,17 @@ struct PrintSettings {
     var printerName: String
     var media: String
     var dryRun: Bool
+    var fitToPage: Bool
+    var dedupe: Bool
+    var dedupeWindowMinutes: Int
 
     var shellArguments: [String] {
         var arguments = [
             "--printer-name", printerName,
             "--print-dry-run", dryRun ? "true" : "false",
+            "--print-fit-to-page", fitToPage ? "true" : "false",
+            "--print-dedupe", dedupe ? "true" : "false",
+            "--dedupe-window-ms", "\(max(0, dedupeWindowMinutes) * 60 * 1000)",
         ]
         if !media.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             arguments += ["--print-media", media]
@@ -173,9 +186,19 @@ struct PrintSettings {
     static var current: PrintSettings {
         let defaults = UserDefaults.standard
         let printerName = defaults.string(forKey: SettingsKeys.printerName) ?? "TAOBAO"
-        let media = defaults.string(forKey: SettingsKeys.printMedia) ?? ""
+        let media = defaults.string(forKey: SettingsKeys.printMedia) ?? "100x180mm"
         let dryRun = defaults.object(forKey: SettingsKeys.printDryRun) as? Bool ?? true
-        return PrintSettings(printerName: printerName.isEmpty ? "TAOBAO" : printerName, media: media, dryRun: dryRun)
+        let fitToPage = defaults.object(forKey: SettingsKeys.printFitToPage) as? Bool ?? true
+        let dedupe = defaults.object(forKey: SettingsKeys.printDedupe) as? Bool ?? true
+        let dedupeWindowMinutes = defaults.object(forKey: SettingsKeys.dedupeWindowMinutes) as? Int ?? 10
+        return PrintSettings(
+            printerName: printerName.isEmpty ? "TAOBAO" : printerName,
+            media: media,
+            dryRun: dryRun,
+            fitToPage: fitToPage,
+            dedupe: dedupe,
+            dedupeWindowMinutes: dedupeWindowMinutes
+        )
     }
 }
 
@@ -191,6 +214,12 @@ private struct MockLogEvent: Decodable {
     let result: String?
     let activeConnections: Int?
     let port: Int?
+    let printer: String?
+    let pdfPath: String?
+    let commandText: String?
+    let error: String?
+    let previousCommandText: String?
+    let previousPdfPath: String?
 }
 
 final class ServiceSupervisor: @unchecked Sendable {
@@ -238,6 +267,8 @@ final class ServiceSupervisor: @unchecked Sendable {
         let activeBrowserConnections = establishedConnectionCount(on: 13528)
         let rawLogLines = readLogLines(maxLines: 1200)
         let recentTasks = parseRecentTasks(from: rawLogLines)
+        let printJobs = parsePrintJobs(from: rawLogLines)
+        let printerDevices = discoverPrinterDevices(defaultPrinterName: PrintSettings.current.printerName)
         let serviceState = deriveServiceState(pidIsAlive: pidIsAlive, ports: ports)
         let serviceSummary = buildServiceSummary(state: serviceState, ports: ports, connections: activeBrowserConnections)
         let latestPreviewPDF = findLatestPreviewPDF()
@@ -247,6 +278,8 @@ final class ServiceSupervisor: @unchecked Sendable {
             ports: ports,
             activeBrowserConnections: activeBrowserConnections,
             recentTasks: recentTasks,
+            printJobs: printJobs,
+            printerDevices: printerDevices,
             rawLogLines: rawLogLines,
             latestPreviewPDF: latestPreviewPDF,
             pidIsAlive: pidIsAlive
@@ -420,6 +453,68 @@ final class ServiceSupervisor: @unchecked Sendable {
         }
     }
 
+    private func parsePrintJobs(from lines: [String]) -> [PrintJob] {
+        var jobs: [String: (job: PrintJob, timestampText: String)] = [:]
+
+        for line in lines {
+            guard let event = decodeEvent(from: line),
+                  event.type == "print-job",
+                  let id = event.requestID ?? event.taskID else {
+                continue
+            }
+
+            let phase = event.phase ?? ""
+            let status = printJobStatus(for: phase)
+            let pdfPath = event.pdfPath ?? event.previousPdfPath ?? ""
+            let commandText = event.commandText ?? event.previousCommandText
+            let errorMessage = printJobErrorMessage(for: event)
+            let job = PrintJob(
+                id: id,
+                waybillCode: event.taskID ?? id,
+                printerName: event.printer ?? PrintSettings.current.printerName,
+                pdfPath: pdfPath,
+                status: status,
+                errorMessage: errorMessage,
+                commandText: commandText
+            )
+            jobs[id] = (job, event.time ?? "")
+        }
+
+        return jobs.values
+            .sorted {
+                if $0.timestampText == $1.timestampText {
+                    return $0.job.id > $1.job.id
+                }
+                return $0.timestampText > $1.timestampText
+            }
+            .map(\.job)
+    }
+
+    private func printJobStatus(for phase: String) -> PrintJobStatus {
+        switch phase {
+        case "duplicate-suppressed":
+            return .skippedDuplicate
+        case "dry-run":
+            return .dryRun
+        case "submitted":
+            return .submitted
+        case "failed":
+            return .failed
+        default:
+            return .pending
+        }
+    }
+
+    private func printJobErrorMessage(for event: MockLogEvent) -> String? {
+        if let error = event.error, !error.isEmpty {
+            return error
+        }
+        if event.phase == "duplicate-suppressed" {
+            return "10 分钟窗口内重复提交，已按去重依据跳过 lpr"
+        }
+        return nil
+    }
+
     private func decodeEvent(from line: String) -> MockLogEvent? {
         let prefix = "[cainiao-mock:event] "
         guard line.hasPrefix(prefix) else { return nil }
@@ -452,6 +547,52 @@ final class ServiceSupervisor: @unchecked Sendable {
         let portSummary = ports.map { "\($0.label)\($0.stateText)" }.joined(separator: " · ")
         let connectionText = connections == 1 ? "1 个浏览器连接" : "\(connections) 个浏览器连接"
         return "\(state.title) • \(portSummary) • \(connectionText)"
+    }
+
+    private func discoverPrinterDevices(defaultPrinterName configuredDefault: String) -> [PrinterDevice] {
+        guard let executable = executableURL(named: "lpstat") else {
+            return [PrinterDevice(name: configuredDefault, isDefault: true, isEnabled: true)]
+        }
+
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = executable
+        process.arguments = ["-p", "-d"]
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return [PrinterDevice(name: configuredDefault, isDefault: true, isEnabled: true)]
+        }
+
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        var defaultPrinter = configuredDefault
+        var devices: [PrinterDevice] = []
+
+        for rawLine in output.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("system default destination:") {
+                defaultPrinter = line.replacingOccurrences(of: "system default destination:", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                continue
+            }
+            guard line.hasPrefix("printer ") else { continue }
+            let parts = line.split(separator: " ")
+            guard parts.count >= 2 else { continue }
+            let name = String(parts[1])
+            let isEnabled = !line.localizedCaseInsensitiveContains("disabled")
+                && !line.localizedCaseInsensitiveContains("已禁用")
+            devices.append(PrinterDevice(name: name, isDefault: name == defaultPrinter, isEnabled: isEnabled))
+        }
+
+        if !devices.contains(where: { $0.name == configuredDefault }) {
+            devices.insert(PrinterDevice(name: configuredDefault, isDefault: devices.isEmpty, isEnabled: true), at: 0)
+        }
+
+        return devices
     }
 
     private func findLatestPreviewPDF() -> URL? {
@@ -531,6 +672,8 @@ final class AppModel: NSObject, ObservableObject {
     @Published var ports: [PortStatus] = []
     @Published var activeBrowserConnections: Int = 0
     @Published var recentTasks: [RecentTask] = []
+    @Published var printJobs: [PrintJob] = []
+    @Published var printerDevices: [PrinterDevice] = [.fallback]
     @Published var redactedLogs: String = ""
     @Published var latestPreviewPDF: URL?
     @Published var lastActionOutput: String = ""
@@ -591,7 +734,8 @@ final class AppModel: NSObject, ObservableObject {
         let printSettings = PrintSettings.current
 
         serviceState = action == .stop ? .stopping : .starting
-        serviceSummary = "\(serviceState.title) • \(runtimeMode.title) • \(printSettings.dryRun ? "dry-run" : "真实打印")"
+        let dedupeText = printSettings.dedupe ? "去重 \(printSettings.dedupeWindowMinutes) 分钟" : "去重关闭"
+        serviceSummary = "\(serviceState.title) • \(runtimeMode.title) • \(printSettings.dryRun ? "dry-run" : "真实打印") • \(dedupeText)"
 
         let result = supervisor.perform(action, runtimeMode: runtimeMode, autoOpenPreview: autoOpenPreview, printSettings: printSettings)
         lastActionOutput = result.result.output.isEmpty ? "命令已执行" : result.result.output
@@ -608,6 +752,8 @@ final class AppModel: NSObject, ObservableObject {
         ports = snapshot.ports
         activeBrowserConnections = snapshot.activeBrowserConnections
         recentTasks = Array(snapshot.recentTasks.prefix(20))
+        printJobs = Array(snapshot.printJobs.prefix(12))
+        printerDevices = snapshot.printerDevices
         latestPreviewPDF = snapshot.latestPreviewPDF
         lastRawLogLineCount = snapshot.rawLogLines.count
 

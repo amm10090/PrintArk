@@ -34,21 +34,41 @@ final class TabooprintTests: XCTestCase {
     }
 
     func testPrintSettingsDefaultToDryRun() {
-        let settings = PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true)
+        let settings = PrintSettings(
+            printerName: "TAOBAO",
+            media: "100x180mm",
+            dryRun: true,
+            fitToPage: true,
+            dedupe: true,
+            dedupeWindowMinutes: 10
+        )
 
         XCTAssertEqual(settings.shellArguments, [
             "--printer-name", "TAOBAO",
             "--print-dry-run", "true",
+            "--print-fit-to-page", "true",
+            "--print-dedupe", "true",
+            "--dedupe-window-ms", "600000",
             "--print-media", "100x180mm",
         ])
     }
 
     func testRealPrintMustBeExplicit() {
-        let settings = PrintSettings(printerName: "TAOBAO", media: "", dryRun: false)
+        let settings = PrintSettings(
+            printerName: "TAOBAO",
+            media: "",
+            dryRun: false,
+            fitToPage: false,
+            dedupe: false,
+            dedupeWindowMinutes: 10
+        )
 
         XCTAssertEqual(settings.shellArguments, [
             "--printer-name", "TAOBAO",
             "--print-dry-run", "false",
+            "--print-fit-to-page", "false",
+            "--print-dedupe", "false",
+            "--dedupe-window-ms", "600000",
         ])
     }
 
