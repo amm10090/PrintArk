@@ -1,8 +1,6 @@
 # Tabooprint
 
-macOS native MVP for the Cainiao / Taobao print mock. The current first pass is a SwiftUI menu bar app that supervises the existing Node mock and exposes compact service controls, port status, recent task history, and redacted logs.
-
-The service layer for phase 1 is supervision-based: the app controls the existing Node mock first, then the native service can replace it later without changing the UI contract.
+macOS native MVP for the Cainiao / Taobao print mock. The app now runs the local print replacement service directly in Swift: WebSocket on `13528`, HTTP preview PDFs on `13525`, task history, redacted logs, dry-run printing, and duplicate protection all live inside the native runtime.
 
 ## Current MVP
 
@@ -12,7 +10,7 @@ The service layer for phase 1 is supervision-based: the app controls the existin
 - Auto-open preview toggle
 - Recent task table
 - Redacted log viewer
-- Existing Node mock supervision for ports `13528` and `13525`
+- Native SwiftNIO service for ports `13528` and `13525`
 - Regression replay for `preview=true`, `preview=false`, empty documents, and decrypt failure
 - macOS printer discovery plus `lpr` dry-run / explicit real-print pipeline
 - Task-specific waybill PDF rendering from each `print` payload
@@ -21,16 +19,16 @@ The service layer for phase 1 is supervision-based: the app controls the existin
 
 ```bash
 rtk swift build
-rtk bash scripts/cainiao_mock.sh start
+rtk .build/debug/Tabooprint --service-only --auto-open-preview false
 ```
 
-Launch the built app from Xcode or the generated SwiftPM product once the bundle wrapper is added.
+Launch the built app from Xcode or the generated SwiftPM product for the menu bar UI. Use `--service-only` for protocol replay and command-line verification.
 
 ## Notes
 
-- `scripts/mock_cainiao_server.js` remains the protocol reference.
 - `raw_capture_artifacts/` is treated as evidence and not mutated.
-- `preview=true` remains the default runtime behavior for the mock.
+- `preview=true` remains the default runtime behavior for the native service.
+- The runtime no longer depends on Node.js, bash service wrappers, or the previous Python renderer.
 
 ## 目录结构
 
@@ -47,8 +45,6 @@ Tabooprint/
 │   └── checkpoint_turn105_plus.md    # 中期 checkpoint
 ├── scripts/                   # 可运行工具
 │   ├── replay_13528_preview.py       # [✅ 已验证] replay 验证脚本
-│   ├── render_waybill_pdf.py         # 任务专属面单 PDF 渲染器
-│   └── send_full_preview_probe.js    # JS probe 负载
 ├── captures/
 │   ├── probe_results/         # 原始捕获的关键 JSON 负载
 │   │   ├── 13528_setPrinterConfig_*.json       # 真实 setPrinterConfig
@@ -84,9 +80,22 @@ Tabooprint/
 
 ```bash
 cd /Users/amo/project/Tabooprint
+rtk .build/debug/Tabooprint --service-only --auto-open-preview false
 rtk python3 scripts/replay_13528_preview.py
+```
+
+`preview=false` 需要以尊重 preview 标记的模式启动：
+
+```bash
+rtk .build/debug/Tabooprint --service-only --auto-open-preview false --force-preview false --print-dry-run true
 rtk python3 scripts/replay_13528_preview.py --case preview-false
 rtk python3 scripts/replay_13528_preview.py --case empty-documents
+```
+
+解密失败模式：
+
+```bash
+rtk .build/debug/Tabooprint --service-only --auto-open-preview false --fail decrypt
 rtk python3 scripts/replay_13528_preview.py --case decrypt-failure
 ```
 
@@ -101,35 +110,35 @@ rtk python3 scripts/replay_13528_preview.py --case decrypt-failure
 `preview=false` 可以进入 macOS 打印路径。默认是 dry-run，只记录即将执行的 `lpr` 命令，不会真实打印：
 
 ```bash
-rtk bash scripts/cainiao_mock.sh start --force-preview false --printer-name TAOBAO --print-media 100x180mm --print-dry-run true
+rtk .build/debug/Tabooprint --service-only --force-preview false --printer-name TAOBAO --print-media 100x180mm --print-dry-run true
 ```
 
 真实打印必须显式关闭 dry-run：
 
 ```bash
-rtk bash scripts/cainiao_mock.sh start --force-preview false --printer-name TAOBAO --print-media 100x180mm --print-dry-run false
+rtk .build/debug/Tabooprint --service-only --force-preview false --printer-name TAOBAO --print-media 100x180mm --print-dry-run false
 ```
 
 物理打印默认启用 10 分钟任务去重。服务会按打印机、纸张参数、documentID 和面单内容指纹识别重复任务；命中重复时跳过第二次 `lpr`，但仍向千牛返回成功流程，避免页面卡住。需要强制重打时可以重启服务、等待去重窗口过期，或显式关闭：
 
 ```bash
-rtk bash scripts/cainiao_mock.sh start --force-preview false --printer-name TAOBAO --print-dry-run false --print-dedupe false
+rtk .build/debug/Tabooprint --service-only --force-preview false --printer-name TAOBAO --print-dry-run false --print-dedupe false
 ```
 
 也可以调整窗口：
 
 ```bash
-rtk bash scripts/cainiao_mock.sh start --force-preview false --printer-name TAOBAO --print-dry-run false --dedupe-window-ms 60000
+rtk .build/debug/Tabooprint --service-only --force-preview false --printer-name TAOBAO --print-dry-run false --dedupe-window-ms 60000
 ```
 
-当前会先从本次 `print` payload 生成任务专属 PDF，再把这份 PDF 用于 preview URL 或 `lpr`。渲染器现在会解开 `contents[0].encryptedData`，并按真实 Cainiao 模板坐标绘制中通 300336 标准模板与 73159162 自定义区：
+当前会先从本次 `print` payload 生成任务专属 PDF，再把这份 PDF 用于 preview URL 或 `lpr`。Swift 渲染器会解开 `contents[0].encryptedData`，并按当前中通 300336 标准模板与 73159162 自定义区的固定毫米坐标绘制：
 
 - 面单号 / 条码
 - 收件人、隐私号、路由码、集包信息、寄件人等标准面单字段
-- 淘宝 logo、收/寄图标、左右竖排面单号、底部广告图等缓存资源
+- 淘宝文本标识、收/寄/验标识、左右竖排面单号、分隔线与底部条码区
 - 商品、数量、买家备注、卖家备注等 custom area 字段
 
-已验证输出纸规为官方预览一致的 74x126mm。剩余差距是通用 LPML/EJS 模板引擎：当前优先支持已抓到的中通 300336/73159162 组合，后续如遇到新快递公司或新模板 ID，需要补对应模板映射或实现完整模板解释器。
+已验证输出纸规为官方预览一致的 74x126mm。当前支持已抓到的中通 300336/73159162 组合；后续如遇到新快递公司或新模板 ID，需要补对应模板映射或实现完整模板解释器。
 
 ## 协议核心：6 步预览流
 

@@ -38,19 +38,6 @@ enum RuntimeMode: String, CaseIterable, Identifiable {
         }
     }
 
-    var shellArguments: [String] {
-        switch self {
-        case .defaultPreview:
-            return []
-        case .respectPreviewFlag:
-            return ["--force-preview", "false"]
-        case .failureDocumentNotFound:
-            return ["--fail", "document-not-found"]
-        case .failureDecrypt:
-            return ["--fail", "decrypt"]
-        }
-    }
-
     static var current: RuntimeMode {
         let raw = UserDefaults.standard.string(forKey: SettingsKeys.runtimeMode) ?? RuntimeMode.defaultPreview.rawValue
         return RuntimeMode(rawValue: raw) ?? .defaultPreview
@@ -169,20 +156,6 @@ struct PrintSettings {
     var dedupe: Bool
     var dedupeWindowMinutes: Int
 
-    var shellArguments: [String] {
-        var arguments = [
-            "--printer-name", printerName,
-            "--print-dry-run", dryRun ? "true" : "false",
-            "--print-fit-to-page", fitToPage ? "true" : "false",
-            "--print-dedupe", dedupe ? "true" : "false",
-            "--dedupe-window-ms", "\(max(0, dedupeWindowMinutes) * 60 * 1000)",
-        ]
-        if !media.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            arguments += ["--print-media", media]
-        }
-        return arguments
-    }
-
     static var current: PrintSettings {
         let defaults = UserDefaults.standard
         let printerName = defaults.string(forKey: SettingsKeys.printerName) ?? "TAOBAO"
@@ -202,469 +175,6 @@ struct PrintSettings {
     }
 }
 
-private struct MockLogEvent: Decodable {
-    let type: String?
-    let time: String?
-    let phase: String?
-    let command: String?
-    let requestID: String?
-    let taskID: String?
-    let documentCount: Int?
-    let mode: String?
-    let result: String?
-    let activeConnections: Int?
-    let port: Int?
-    let printer: String?
-    let pdfPath: String?
-    let commandText: String?
-    let error: String?
-    let previousCommandText: String?
-    let previousPdfPath: String?
-}
-
-final class ServiceSupervisor: @unchecked Sendable {
-    let repoRoot: URL
-    let scriptURL: URL
-    let pidFileURL: URL
-    let logFileURL: URL
-    let previewDirectoryURL: URL
-
-    private let shellURL = URL(fileURLWithPath: "/bin/zsh")
-
-    init() {
-        let root = ServiceSupervisor.locateRepositoryRoot() ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        repoRoot = root
-        scriptURL = root.appendingPathComponent("scripts/cainiao_mock.sh")
-        pidFileURL = root.appendingPathComponent(".cainiao-mock.pid")
-        logFileURL = root.appendingPathComponent(".cainiao-mock.log")
-        previewDirectoryURL = URL(fileURLWithPath: "/Users/amo/cainiao-x-print/preview")
-    }
-
-    func perform(_ action: ServiceAction, runtimeMode: RuntimeMode, autoOpenPreview: Bool, printSettings: PrintSettings) -> (result: CommandResult, snapshot: SupervisorSnapshot) {
-        let arguments: [String]
-        switch action {
-        case .start, .restart:
-            arguments = [action.rawValue]
-                + runtimeMode.shellArguments
-                + ["--auto-open-preview", autoOpenPreview ? "true" : "false"]
-                + printSettings.shellArguments
-        case .stop:
-            arguments = [action.rawValue]
-        }
-
-        let result = runShellScript(arguments: arguments)
-        let expectedState: ServiceState? = action == .stop ? .stopped : .running
-        let snapshot = waitForStableSnapshot(expectedState: expectedState, timeout: 6.0)
-        return (result, snapshot)
-    }
-
-    func collectSnapshot() -> SupervisorSnapshot {
-        let pid = readPid()
-        let pidIsAlive = pid.map(isProcessAlive(_:)) ?? false
-        let wsPort = portStatus(port: 13528, label: "WS")
-        let httpPort = portStatus(port: 13525, label: "HTTP")
-        let ports = [wsPort, httpPort]
-        let activeBrowserConnections = establishedConnectionCount(on: 13528)
-        let rawLogLines = readLogLines(maxLines: 1200)
-        let recentTasks = parseRecentTasks(from: rawLogLines)
-        let printJobs = parsePrintJobs(from: rawLogLines)
-        let printerDevices = discoverPrinterDevices(defaultPrinterName: PrintSettings.current.printerName)
-        let serviceState = deriveServiceState(pidIsAlive: pidIsAlive, ports: ports)
-        let serviceSummary = buildServiceSummary(state: serviceState, ports: ports, connections: activeBrowserConnections)
-        let latestPreviewPDF = findLatestPreviewPDF()
-        return SupervisorSnapshot(
-            serviceState: serviceState,
-            serviceSummary: serviceSummary,
-            ports: ports,
-            activeBrowserConnections: activeBrowserConnections,
-            recentTasks: recentTasks,
-            printJobs: printJobs,
-            printerDevices: printerDevices,
-            rawLogLines: rawLogLines,
-            latestPreviewPDF: latestPreviewPDF,
-            pidIsAlive: pidIsAlive
-        )
-    }
-
-    func openLatestPreviewPDF() -> URL? {
-        findLatestPreviewPDF()
-    }
-
-    private func waitForStableSnapshot(expectedState: ServiceState?, timeout: TimeInterval) -> SupervisorSnapshot {
-        let deadline = Date().addingTimeInterval(timeout)
-        var snapshot = collectSnapshot()
-
-        while Date() < deadline {
-            if let expectedState, snapshot.serviceState == expectedState {
-                return snapshot
-            }
-            if expectedState == nil {
-                return snapshot
-            }
-            Thread.sleep(forTimeInterval: 0.25)
-            snapshot = collectSnapshot()
-        }
-
-        return snapshot
-    }
-
-    private func runShellScript(arguments: [String]) -> CommandResult {
-        let command = ([scriptURL.path] + arguments).map(shellQuote(_:)).joined(separator: " ")
-        let process = Process()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.executableURL = shellURL
-        process.arguments = ["-lc", command]
-        process.currentDirectoryURL = repoRoot
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return CommandResult(exitCode: -1, output: "failed to launch script: \(error.localizedDescription)")
-        }
-
-        let stdout = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let combined = (stdout + stderr).trimmingCharacters(in: .whitespacesAndNewlines)
-        return CommandResult(exitCode: process.terminationStatus, output: combined)
-    }
-
-    private func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    private func readPid() -> Int32? {
-        guard let raw = try? String(contentsOf: pidFileURL, encoding: .utf8) else {
-            return nil
-        }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return Int32(trimmed)
-    }
-
-    private func isProcessAlive(_ pid: Int32) -> Bool {
-        let result = kill(pid, 0)
-        return result == 0 || errno == EPERM
-    }
-
-    private func portStatus(port: Int, label: String) -> PortStatus {
-        let listeningCount = lsofCount(arguments: ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN"])
-        return PortStatus(id: port, port: port, label: label, isListening: listeningCount > 0, listenerCount: listeningCount)
-    }
-
-    private func establishedConnectionCount(on port: Int) -> Int {
-        lsofCount(arguments: ["-nP", "-iTCP:\(port)", "-sTCP:ESTABLISHED"])
-    }
-
-    private func lsofCount(arguments: [String]) -> Int {
-        guard let executable = executableURL(named: "lsof") else { return 0 }
-
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return 0
-        }
-
-        guard process.terminationStatus == 0 || process.terminationStatus == 1 else {
-            return 0
-        }
-
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let lines = output.split(whereSeparator: \.isNewline)
-        guard lines.count > 1 else { return 0 }
-        return max(0, lines.count - 1)
-    }
-
-    private func readLogLines(maxLines: Int) -> [String] {
-        guard let raw = try? String(contentsOf: logFileURL, encoding: .utf8), !raw.isEmpty else {
-            return []
-        }
-
-        var lines = raw.components(separatedBy: .newlines)
-        while let last = lines.last, last.isEmpty {
-            lines.removeLast()
-        }
-
-        if lines.count > maxLines {
-            lines = Array(lines.suffix(maxLines))
-        }
-
-        return lines
-    }
-
-    private func parseRecentTasks(from lines: [String]) -> [RecentTask] {
-        var tasks: [String: RecentTask] = [:]
-
-        for line in lines {
-            guard let event = decodeEvent(from: line), event.type == "task", let requestID = event.requestID else {
-                continue
-            }
-
-            var task = tasks[requestID] ?? RecentTask(
-                id: requestID,
-                timestampText: event.time ?? "",
-                command: event.command ?? "print",
-                requestID: requestID,
-                documentCount: event.documentCount ?? 0,
-                mode: event.mode ?? "",
-                result: event.result ?? "in-progress",
-                isInProgress: event.phase != "finish"
-            )
-
-            if let time = event.time, !time.isEmpty {
-                task.timestampText = time
-            }
-            if let command = event.command, !command.isEmpty {
-                task.command = command
-            }
-            if let documentCount = event.documentCount {
-                task.documentCount = documentCount
-            }
-            if let mode = event.mode, !mode.isEmpty {
-                task.mode = mode
-            }
-            if let result = event.result, !result.isEmpty {
-                task.result = result
-            }
-            if event.phase == "finish" {
-                task.isInProgress = false
-            } else if event.phase == "start" {
-                task.isInProgress = true
-            }
-
-            tasks[requestID] = task
-        }
-
-        return tasks.values.sorted {
-            if $0.timestampText == $1.timestampText {
-                return $0.requestID > $1.requestID
-            }
-            return $0.timestampText > $1.timestampText
-        }
-    }
-
-    private func parsePrintJobs(from lines: [String]) -> [PrintJob] {
-        var jobs: [String: (job: PrintJob, timestampText: String)] = [:]
-
-        for line in lines {
-            guard let event = decodeEvent(from: line),
-                  event.type == "print-job",
-                  let id = event.requestID ?? event.taskID else {
-                continue
-            }
-
-            let phase = event.phase ?? ""
-            let status = printJobStatus(for: phase)
-            let pdfPath = event.pdfPath ?? event.previousPdfPath ?? ""
-            let commandText = event.commandText ?? event.previousCommandText
-            let errorMessage = printJobErrorMessage(for: event)
-            let job = PrintJob(
-                id: id,
-                waybillCode: event.taskID ?? id,
-                printerName: event.printer ?? PrintSettings.current.printerName,
-                pdfPath: pdfPath,
-                status: status,
-                errorMessage: errorMessage,
-                commandText: commandText
-            )
-            jobs[id] = (job, event.time ?? "")
-        }
-
-        return jobs.values
-            .sorted {
-                if $0.timestampText == $1.timestampText {
-                    return $0.job.id > $1.job.id
-                }
-                return $0.timestampText > $1.timestampText
-            }
-            .map(\.job)
-    }
-
-    private func printJobStatus(for phase: String) -> PrintJobStatus {
-        switch phase {
-        case "duplicate-suppressed":
-            return .skippedDuplicate
-        case "dry-run":
-            return .dryRun
-        case "submitted":
-            return .submitted
-        case "failed":
-            return .failed
-        default:
-            return .pending
-        }
-    }
-
-    private func printJobErrorMessage(for event: MockLogEvent) -> String? {
-        if let error = event.error, !error.isEmpty {
-            return error
-        }
-        if event.phase == "duplicate-suppressed" {
-            return "10 分钟窗口内重复提交，已按去重依据跳过 lpr"
-        }
-        return nil
-    }
-
-    private func decodeEvent(from line: String) -> MockLogEvent? {
-        let prefix = "[cainiao-mock:event] "
-        guard line.hasPrefix(prefix) else { return nil }
-        let jsonText = String(line.dropFirst(prefix.count))
-        guard let data = jsonText.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(MockLogEvent.self, from: data)
-    }
-
-    private func deriveServiceState(pidIsAlive: Bool, ports: [PortStatus]) -> ServiceState {
-        let allListening = ports.allSatisfy { $0.isListening }
-        let anyListening = ports.contains { $0.isListening }
-        let allClosed = ports.allSatisfy { !$0.isListening }
-
-        if pidIsAlive && allListening {
-            return .running
-        }
-        if !pidIsAlive && allClosed {
-            return .stopped
-        }
-        if pidIsAlive && !allListening {
-            return .starting
-        }
-        if !pidIsAlive && anyListening {
-            return .error
-        }
-        return .stopped
-    }
-
-    private func buildServiceSummary(state: ServiceState, ports: [PortStatus], connections: Int) -> String {
-        let portSummary = ports.map { "\($0.label)\($0.stateText)" }.joined(separator: " · ")
-        let connectionText = connections == 1 ? "1 个浏览器连接" : "\(connections) 个浏览器连接"
-        return "\(state.title) • \(portSummary) • \(connectionText)"
-    }
-
-    private func discoverPrinterDevices(defaultPrinterName configuredDefault: String) -> [PrinterDevice] {
-        guard let executable = executableURL(named: "lpstat") else {
-            return [PrinterDevice(name: configuredDefault, isDefault: true, isEnabled: true)]
-        }
-
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = executable
-        process.arguments = ["-p", "-d"]
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return [PrinterDevice(name: configuredDefault, isDefault: true, isEnabled: true)]
-        }
-
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        var defaultPrinter = configuredDefault
-        var devices: [PrinterDevice] = []
-
-        for rawLine in output.components(separatedBy: .newlines) {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.hasPrefix("system default destination:") {
-                defaultPrinter = line.replacingOccurrences(of: "system default destination:", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                continue
-            }
-            guard line.hasPrefix("printer ") else { continue }
-            let parts = line.split(separator: " ")
-            guard parts.count >= 2 else { continue }
-            let name = String(parts[1])
-            let isEnabled = !line.localizedCaseInsensitiveContains("disabled")
-                && !line.localizedCaseInsensitiveContains("已禁用")
-            devices.append(PrinterDevice(name: name, isDefault: name == defaultPrinter, isEnabled: isEnabled))
-        }
-
-        if !devices.contains(where: { $0.name == configuredDefault }) {
-            devices.insert(PrinterDevice(name: configuredDefault, isDefault: devices.isEmpty, isEnabled: true), at: 0)
-        }
-
-        return devices
-    }
-
-    private func findLatestPreviewPDF() -> URL? {
-        guard FileManager.default.fileExists(atPath: previewDirectoryURL.path) else {
-            return nil
-        }
-
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: previewDirectoryURL,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        )) ?? []
-
-        return urls
-            .filter { $0.pathExtension.lowercased() == "pdf" }
-            .sorted {
-                let lhs = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let rhs = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                return lhs > rhs
-            }
-            .first
-    }
-
-    private func executableURL(named name: String) -> URL? {
-        let candidates = [
-            "/usr/sbin/\(name)",
-            "/usr/bin/\(name)",
-            "/bin/\(name)",
-        ]
-        for candidate in candidates where FileManager.default.fileExists(atPath: candidate) {
-            return URL(fileURLWithPath: candidate)
-        }
-        return nil
-    }
-
-    private static func locateRepositoryRoot() -> URL? {
-        let fileManager = FileManager.default
-        let environment = ProcessInfo.processInfo.environment
-
-        var candidates: [URL] = [
-            URL(fileURLWithPath: fileManager.currentDirectoryPath),
-            URL(fileURLWithPath: environment["PWD"] ?? fileManager.currentDirectoryPath),
-        ]
-
-        if let executable = Bundle.main.executableURL {
-            candidates.append(executable.deletingLastPathComponent())
-        }
-
-        if let commandLine = CommandLine.arguments.first, !commandLine.isEmpty {
-            candidates.append(URL(fileURLWithPath: commandLine).deletingLastPathComponent())
-        }
-
-        for candidate in candidates {
-            var current = candidate
-            for _ in 0..<10 {
-                let marker = current.appendingPathComponent("PLAN.md")
-                let script = current.appendingPathComponent("scripts/mock_cainiao_server.js")
-                if fileManager.fileExists(atPath: marker.path) && fileManager.fileExists(atPath: script.path) {
-                    return current
-                }
-                let parent = current.deletingLastPathComponent()
-                if parent.path == current.path {
-                    break
-                }
-                current = parent
-            }
-        }
-
-        return nil
-    }
-}
-
 @MainActor
 final class AppModel: NSObject, ObservableObject {
     @Published var serviceState: ServiceState = .stopped
@@ -679,7 +189,7 @@ final class AppModel: NSObject, ObservableObject {
     @Published var lastActionOutput: String = ""
     @Published var lastRefreshedText: String = "从未刷新"
 
-    private let supervisor = ServiceSupervisor()
+    private let printService = NativePrintService()
     private var pollingTimer: Timer?
     private var logViewerLineBaseline = 0
     private var lastRawLogLineCount = 0
@@ -697,7 +207,7 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     func refresh() {
-        let snapshot = supervisor.collectSnapshot()
+        let snapshot = printService.snapshot()
         apply(snapshot: snapshot)
     }
 
@@ -714,7 +224,7 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     func openLatestPreview() {
-        guard let url = supervisor.openLatestPreviewPDF() else {
+        guard let url = printService.latestPreviewPDF else {
             lastActionOutput = "未找到预览 PDF"
             return
         }
@@ -737,10 +247,23 @@ final class AppModel: NSObject, ObservableObject {
         let dedupeText = printSettings.dedupe ? "去重 \(printSettings.dedupeWindowMinutes) 分钟" : "去重关闭"
         serviceSummary = "\(serviceState.title) • \(runtimeMode.title) • \(printSettings.dryRun ? "dry-run" : "真实打印") • \(dedupeText)"
 
-        let result = supervisor.perform(action, runtimeMode: runtimeMode, autoOpenPreview: autoOpenPreview, printSettings: printSettings)
-        lastActionOutput = result.result.output.isEmpty ? "命令已执行" : result.result.output
-        apply(snapshot: result.snapshot)
-        if result.result.exitCode != 0 {
+        let configuration = PrintServiceConfiguration.current(
+            runtimeMode: runtimeMode,
+            autoOpenPreview: autoOpenPreview,
+            printSettings: printSettings
+        )
+        let result: CommandResult
+        switch action {
+        case .start:
+            result = printService.start(configuration: configuration)
+        case .stop:
+            result = printService.stop()
+        case .restart:
+            result = printService.restart(configuration: configuration)
+        }
+        lastActionOutput = result.output.isEmpty ? "命令已执行" : result.output
+        apply(snapshot: printService.snapshot())
+        if result.exitCode != 0 {
             serviceState = .error
             serviceSummary = "错误 • \(lastActionOutput)"
         }

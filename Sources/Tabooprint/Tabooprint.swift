@@ -5,6 +5,10 @@ import SwiftUI
 @MainActor
 struct TabooprintApp {
     static func main() {
+        if ServiceOnlyRunner.runIfRequested() {
+            return
+        }
+
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate
