@@ -1,0 +1,33 @@
+# Ignore everything by default; keep the MVP repository focused.
+*
+
+# Repository metadata.
+!.gitignore
+!README.md
+!Package.swift
+
+# Source and tests.
+!Sources/
+!Sources/**
+!Tests/
+!Tests/**
+
+# Runtime scripts.
+!scripts/
+!scripts/*.js
+!scripts/*.py
+!scripts/*.sh
+
+# Local/system/build noise.
+.DS_Store
+.build/
+Packages/
+DerivedData/
+xcuserdata/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
+.cainiao-mock*.log
+.cainiao-mock.pid
+__pycache__/
+*.pyc
