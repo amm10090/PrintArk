@@ -94,8 +94,48 @@ final class TabooprintTests: XCTestCase {
 
         XCTAssertTrue(data.starts(with: Data("%PDF".utf8)))
         XCTAssertEqual(result.fileName, "TASK.pdf")
+        // 默认纸张为 100×180mm，mediaBox 等于纸张外框尺寸。
+        XCTAssertEqual(mediaBox.width, 100 * 72 / 25.4, accuracy: 0.01)
+        XCTAssertEqual(mediaBox.height, 180 * 72 / 25.4, accuracy: 0.01)
+    }
+
+    func testNativeRendererUsesNativeContentBoxForMatchingPaper() throws {
+        let renderer = NativeWaybillRenderer()
+        let outputDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+        let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
+        let result = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "NATIVE", paperSize: PaperCatalog.match(media: "74x126mm"))
+        let document = try XCTUnwrap(CGPDFDocument(result.url as CFURL))
+        let page = try XCTUnwrap(document.page(at: 1))
+        let mediaBox = page.getBoxRect(.mediaBox)
+
+        // 选 74×126mm 时纸张外框与内容版面一致。
         XCTAssertEqual(mediaBox.width, 74 * 72 / 25.4, accuracy: 0.01)
         XCTAssertEqual(mediaBox.height, 126 * 72 / 25.4, accuracy: 0.01)
+    }
+
+    func testNativeRendererPaperSizeDrivesMediaBox() throws {
+        let renderer = NativeWaybillRenderer()
+        let outputDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+        let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
+        let result = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "A4", paperSize: PaperCatalog.match(media: "A4"))
+        let document = try XCTUnwrap(CGPDFDocument(result.url as CFURL))
+        let page = try XCTUnwrap(document.page(at: 1))
+        let mediaBox = page.getBoxRect(.mediaBox)
+
+        XCTAssertEqual(mediaBox.width, 210 * 72 / 25.4, accuracy: 0.01)
+        XCTAssertEqual(mediaBox.height, 297 * 72 / 25.4, accuracy: 0.01)
+    }
+
+    func testPaperCatalogMatchesAndFallsBack() {
+        XCTAssertEqual(PaperCatalog.default.media, "100x180mm")
+        XCTAssertEqual(PaperCatalog.match(media: "100x180mm").id, "100x180mm")
+        XCTAssertEqual(PaperCatalog.match(media: "A4").widthMM, 210)
+        XCTAssertEqual(PaperCatalog.match(media: "a4").id, "A4")
+        // 未知值回退到默认项。
+        XCTAssertEqual(PaperCatalog.match(media: "totally-unknown").id, PaperCatalog.default.id)
+        XCTAssertEqual(PaperCatalog.match(media: "").id, PaperCatalog.default.id)
     }
 
     func testNativeServiceLifecycleAndHTTPPreview() throws {
@@ -315,6 +355,22 @@ final class TabooprintTests: XCTestCase {
 
         XCTAssertTrue(rendered.starts(with: Data("%PDF".utf8)))
         XCTAssertTrue(fallbackData.starts(with: Data("%PDF".utf8)))
+    }
+
+    func testWaybillPreviewSamplePDFUsesNativeRenderer() throws {
+        let outputDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+        let url = try WaybillPreviewSamplePDF.writeSample(to: outputDir)
+        let data = try Data(contentsOf: url)
+        let document = try XCTUnwrap(CGPDFDocument(url as CFURL))
+        let page = try XCTUnwrap(document.page(at: 1))
+        let mediaBox = page.getBoxRect(.mediaBox)
+
+        XCTAssertTrue(data.starts(with: Data("%PDF".utf8)))
+        XCTAssertGreaterThan(data.count, 5_000)
+        // 示例预览使用默认纸张 100×180mm。
+        XCTAssertEqual(mediaBox.width, 100 * 72 / 25.4, accuracy: 0.01)
+        XCTAssertEqual(mediaBox.height, 180 * 72 / 25.4, accuracy: 0.01)
     }
 
     private func samplePrintPayload() -> String {

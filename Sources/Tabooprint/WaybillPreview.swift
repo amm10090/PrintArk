@@ -1,42 +1,215 @@
+import CryptoSwift
 import PDFKit
 import SwiftUI
 
 struct LabelPreviewWorkspace: View {
     let pdfURL: URL?
 
+    @AppStorage(SettingsKeys.printMedia) private var printMedia = "100x180mm"
+    @State private var samplePDFURL: URL?
+
+    private var paperSize: PaperSize {
+        PaperCatalog.match(media: printMedia)
+    }
+
+    private var displayURL: URL {
+        pdfURL ?? samplePDFURL ?? Self.placeholderSampleURL
+    }
+
+    private static let placeholderSampleURL: URL = {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tabooprint-placeholder.pdf")
+        let w: CGFloat = 370, h: CGFloat = 630
+        var mediaBox = CGRect(x: 0, y: 0, width: w, height: h)
+        if let ctx = CGContext(url as CFURL, mediaBox: &mediaBox, nil) {
+            ctx.beginPDFPage(nil)
+            ctx.setFillColor(CGColor.white)
+            ctx.fill(mediaBox)
+            let font = NSFont.systemFont(ofSize: 14)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: NSColor.secondaryLabelColor
+            ]
+            let text = "样本面单加载中…"
+            let textSize = text.size(withAttributes: attrs)
+            let x = (w - textSize.width) / 2
+            let y = (h - textSize.height) / 2
+            text.draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
+            ctx.endPDFPage()
+            ctx.closePDF()
+        }
+        return url
+    }()
+
+    @MainActor
+    private func generateSamplePDF() -> URL {
+        (try? WaybillPreviewSamplePDF.writeSample()) ?? Self.placeholderSampleURL
+    }
+
     var body: some View {
         ZStack {
             Color(nsColor: .windowBackgroundColor)
 
             VStack(spacing: 18) {
-                PreviewHeader(pdfURL: pdfURL)
+                PreviewHeader(pdfURL: displayURL, paperSize: paperSize)
 
-                ScrollView {
-                    VStack(spacing: 18) {
-                        if let pdfURL {
-                            WaybillPDFCanvas(url: pdfURL)
-                        } else {
-                            EmptyPreviewState()
-                        }
+                TechnicalSpecStrip(paperSize: paperSize)
 
-                        TechnicalSpecStrip()
-                    }
-                    .padding(.vertical, 24)
+                GeometryReader { proxy in
+                    let previewSize = WaybillPreviewLayout.fittedPDFSize(in: proxy.size, aspectRatio: paperSize.aspectRatio)
+
+                    WaybillPDFCanvas(url: displayURL, size: previewSize)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .padding(24)
         }
         .navigationTitle("面单预览")
+        .onAppear {
+            guard pdfURL == nil, samplePDFURL == nil else { return }
+            samplePDFURL = generateSamplePDF()
+        }
+    }
+}
+
+enum WaybillPreviewLayout {
+    static let maxPDFSize = CGSize(width: 370, height: 630)
+
+    static func fittedPDFSize(in availableSize: CGSize, aspectRatio: CGFloat) -> CGSize {
+        let ratio = aspectRatio > 0 ? aspectRatio : (74 / 126)
+        let maxWidth = min(maxPDFSize.width, max(0, availableSize.width - 24))
+        let maxHeight = min(maxPDFSize.height, max(0, availableSize.height - 6))
+        let height = min(maxHeight, maxWidth / ratio)
+        return CGSize(width: height * ratio, height: height)
+    }
+}
+
+enum WaybillPreviewSamplePDF {
+    private static let requestID = "SAMPLE_PREVIEW"
+    private static let taskID = "tabooprint-sample"
+    private static let sampleDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tabooprint", isDirectory: true)
+        .appendingPathComponent("preview-samples", isDirectory: true)
+
+    static func writeSample(to outputDirectory: URL = sampleDirectory) throws -> URL {
+        let renderer = NativeWaybillRenderer()
+        let result = try renderer.render(
+            payload: try samplePayload(for: .sample),
+            outputDirectory: outputDirectory,
+            requestID: requestID,
+            taskID: taskID
+        )
+        return result.url
+    }
+
+    static func samplePayload(for document: WaybillDocument) throws -> [String: JSONValue] {
+        let standard = sampleStandardData(for: document)
+        let custom = sampleCustomData(for: document)
+
+        return [
+            "cmd": .string("print"),
+            "requestID": .string(requestID),
+            "task": .object([
+                "taskID": .string(taskID),
+                "printer": .string("TAOBAO"),
+                "preview": .bool(true),
+                "documents": .array([
+                    .object([
+                        "documentID": .string(document.documentID),
+                        "contents": .array([
+                            .object([
+                                "ver": .string("waybill_print_secret_version_1"),
+                                "encryptedData": .string(try encryptedStandardData(standard)),
+                                "templateURL": .string("https://cloudprint.cainiao.com/template/standard/300336/92"),
+                            ]),
+                            .object([
+                                "data": .object(custom),
+                                "templateURL": .string("https://cloudprint.cainiao.com/template/customArea/73159162/10"),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]),
+        ]
+    }
+
+    private static func sampleStandardData(for document: WaybillDocument) -> [String: JSONValue] {
+        [
+            "waybillCode": .string(document.waybillCode),
+            "routingInfo": .object([
+                "routeCode": .string("演示路由"),
+                "newBlockCode": .string(document.blockCode),
+                "blockCode": .string(document.blockCode),
+                "sortation": .object([
+                    "name": .string(document.sortingCode),
+                ]),
+                "consolidation": .object([
+                    "name": .string(document.consolidationInfo),
+                ]),
+            ]),
+            "recipient": .object([
+                "name": .string(document.receiverName),
+                "mobile": .string(document.receiverPhone),
+                "phone": .string(document.receiverPhone),
+                "secretConsigneeMobile": .string(""),
+                "address": .object([
+                    "province": .string("示例省"),
+                    "city": .string("示例市"),
+                    "district": .string("示例区"),
+                    "town": .string("演示街道"),
+                    "detail": .string("100 号虚拟收货地址"),
+                ]),
+            ]),
+            "sender": .object([
+                "name": .string(document.senderName),
+                "mobile": .string(document.senderPhone),
+                "phone": .string(document.senderPhone),
+                "address": .object([
+                    "province": .string("示例省"),
+                    "city": .string("样板市"),
+                    "district": .string("样板区"),
+                    "town": .string("测试路"),
+                    "detail": .string("200 号虚拟发货仓"),
+                ]),
+            ]),
+            "extraInfo": .object([
+                "staDoorHome": .string("false"),
+            ]),
+        ]
+    }
+
+    private static func sampleCustomData(for document: WaybillDocument) -> [String: JSONValue] {
+        [
+            "WAIBILLNO_BAR_CODE": .string(document.waybillCode),
+            "ITEM_INFO": .string(document.itemInfo),
+            "ITEM_TOTAL_COUNT": .string(document.itemTotalCount),
+            "ORDER_ID": .string(document.orderID),
+            "BUYER_MEMO": .string(document.buyerMemo),
+            "SELLER_MEMO": .string(document.sellerMemo),
+            "PAGE_PRINT_TIPS": .string("演示打印备注"),
+            "showItemInfo": .bool(true),
+            "itemInfoFontSize": .string("10"),
+        ]
+    }
+
+    private static func encryptedStandardData(_ standard: [String: JSONValue]) throws -> String {
+        let payload = try JSONValue.object(standard).encodedData()
+        let key: [UInt8] = [0xCD, 0xBF, 0xFD, 0x0A, 0xC5, 0x9D, 0xE5, 0x6D, 0x3F, 0x17, 0xF9, 0x3A, 0x7E, 0xED, 0xFF, 0x57]
+        let aes = try AES(key: key, blockMode: ECB(), padding: .pkcs7)
+        let encrypted = try aes.encrypt(Array(payload))
+        return "AES:" + Data(encrypted).base64EncodedString()
     }
 }
 
 struct PreviewHeader: View {
     let pdfURL: URL?
+    let paperSize: PaperSize
 
     var body: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("\(WaybillLabelSpec.sizeText) 面单预览")
+                Text("\(paperSize.sizeText) 面单预览")
                     .font(.title2.weight(.semibold))
 
                 Text(pdfURL?.lastPathComponent ?? "暂无预览 PDF")
@@ -69,10 +242,11 @@ struct SpecPill: View {
 
 struct WaybillPDFCanvas: View {
     let url: URL
+    var size = WaybillPreviewLayout.maxPDFSize
 
     var body: some View {
         PDFPreviewView(url: url)
-            .frame(width: 370, height: 630)
+            .frame(width: size.width, height: size.height)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -123,7 +297,8 @@ struct PDFPreviewView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: PDFView, context: Context) {
-        guard context.coordinator.currentURL != url else {
+        let signature = PDFFileSignature(url: url)
+        guard context.coordinator.currentURL != url || context.coordinator.currentSignature != signature else {
             view.autoScales = true
             return
         }
@@ -131,10 +306,23 @@ struct PDFPreviewView: NSViewRepresentable {
         view.document = PDFDocument(url: url)
         view.autoScales = true
         context.coordinator.currentURL = url
+        context.coordinator.currentSignature = signature
     }
 
     final class Coordinator {
         var currentURL: URL?
+        var currentSignature: PDFFileSignature?
+    }
+}
+
+struct PDFFileSignature: Equatable {
+    let modificationDate: Date?
+    let fileSize: Int64?
+
+    init(url: URL) {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        modificationDate = values?.contentModificationDate
+        fileSize = values?.fileSize.map(Int64.init)
     }
 }
 
@@ -318,8 +506,8 @@ struct ItemBlock: View {
             InfoLine(label: "商品信息", value: document.itemInfo)
             InfoLine(label: "商品数量", value: document.itemTotalCount)
             InfoLine(label: "买家昵称", value: document.buyerNick)
-            InfoLine(label: "买家备注", value: document.buyerMemo)
-            InfoLine(label: "卖家备注", value: document.sellerMemo)
+            InfoLine(label: "买家备注", value: document.buyerMemo, lineLimit: nil)
+            InfoLine(label: "卖家备注", value: document.sellerMemo, lineLimit: nil)
         }
         .padding(.vertical, 12)
     }
@@ -328,17 +516,20 @@ struct ItemBlock: View {
 struct InfoLine: View {
     let label: String
     let value: String
+    var lineLimit: Int? = 1
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline) {
+        HStack(alignment: .top) {
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(Color.black.opacity(0.58))
                 .frame(width: 56, alignment: .leading)
+                .padding(.top, 1)
 
             Text(value.isEmpty ? "-" : value)
                 .font(.caption)
-                .lineLimit(1)
+                .lineLimit(lineLimit)
+                .fixedSize(horizontal: false, vertical: true)
 
             Spacer(minLength: 0)
         }
@@ -414,10 +605,12 @@ struct BarcodeBars: View {
 }
 
 struct TechnicalSpecStrip: View {
+    let paperSize: PaperSize
+
     var body: some View {
         HStack(spacing: 10) {
-            TechnicalSpecItem(title: "标签尺寸", value: WaybillLabelSpec.sizeText)
-            TechnicalSpecItem(title: "渲染尺寸", value: WaybillLabelSpec.renderSizeText)
+            TechnicalSpecItem(title: "纸张外框", value: paperSize.sizeText)
+            TechnicalSpecItem(title: "内容版面", value: WaybillLabelSpec.sizeText)
             TechnicalSpecItem(title: "渲染精度", value: WaybillLabelSpec.dpiText)
             TechnicalSpecItem(title: "PX_PER_MM", value: WaybillLabelSpec.pixelsPerMillimeterText)
             TechnicalSpecItem(title: "二维码", value: WaybillLabelSpec.qrCodeText)

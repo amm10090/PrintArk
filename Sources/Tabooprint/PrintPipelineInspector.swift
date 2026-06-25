@@ -77,6 +77,17 @@ struct PipelineSettingsCard: View {
 
     let printers: [PrinterDevice]
 
+    private var selectedPaperSize: PaperSize {
+        PaperCatalog.match(media: printMedia)
+    }
+
+    private var paperSizeBinding: Binding<PaperSize> {
+        Binding(
+            get: { PaperCatalog.match(media: printMedia) },
+            set: { printMedia = $0.media }
+        )
+    }
+
     var body: some View {
         SettingsCard(title: "打印管线", subtitle: "对应当前 macOS lpr 打印链路。") {
             VStack(spacing: 14) {
@@ -96,10 +107,17 @@ struct PipelineSettingsCard: View {
                     )
                 }
 
-                TextField("纸张参数 printMedia", text: $printMedia)
-                    .textFieldStyle(.roundedBorder)
+                Picker("纸张尺寸", selection: paperSizeBinding) {
+                    ForEach(PaperSize.Group.allCases) { group in
+                        Section(group.rawValue) {
+                            ForEach(PaperCatalog.grouped(group)) { size in
+                                Text(size.displayName).tag(size)
+                            }
+                        }
+                    }
+                }
 
-                Text("传给 lpr -o media=...，例如 100x180mm。")
+                Text("传给 lpr -o media=\(selectedPaperSize.media)，纸张外框 \(selectedPaperSize.sizeText)。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)

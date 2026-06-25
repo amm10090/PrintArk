@@ -404,7 +404,7 @@ final class NativePrintService: @unchecked Sendable {
             "pending": .number(45),
             "rendering": .number(160),
         ]
-        let renderResult = renderWaybill(payload: payload, requestID: requestID, taskID: taskID, docs: docs)
+        let renderResult = renderWaybill(payload: payload, requestID: requestID, taskID: taskID, docs: docs, paperSize: PaperCatalog.match(media: config.printSettings.media))
         let previewURL = "http://localhost:\(config.httpPort)/file/\(renderResult.fileName)"
         var physicalPrintJob: PhysicalPrintJob?
 
@@ -572,9 +572,9 @@ final class NativePrintService: @unchecked Sendable {
         channel.writeAndFlush(frame, promise: nil)
     }
 
-    private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument]) -> RenderResult {
+    private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument], paperSize: PaperSize) -> RenderResult {
         do {
-            let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID)
+            let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize)
             lock.withLock {
                 renderedPDFs[result.fileName] = result.url
             }
@@ -878,11 +878,11 @@ private struct PhysicalPrintHistoryItem: Sendable {
 }
 
 final class NativeWaybillRenderer: @unchecked Sendable {
-    private let pageWidthMM: CGFloat = 74
-    private let pageHeightMM: CGFloat = 126
+    private let contentWidthMM: CGFloat = WaybillContentBox.widthMM
+    private let contentHeightMM: CGFloat = WaybillContentBox.heightMM
     private let mmToPoint: CGFloat = 72 / 25.4
 
-    func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String) throws -> RenderResult {
+    func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String, paperSize: PaperSize = PaperCatalog.default) throws -> RenderResult {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         let fileName = "\(safeFilename(taskID)).pdf"
         let outputURL = outputDirectory.appendingPathComponent(fileName)
@@ -892,25 +892,38 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             doc.string("documentID", default: doc.string("documentId", default: "MOCK_DOC_\(index + 1)"))
         }
 
-        var pageRect = CGRect(x: 0, y: 0, width: pageWidthMM * mmToPoint, height: pageHeightMM * mmToPoint)
+        // 外框 = 所选纸张尺寸（PDF mediaBox）。
+        var pageRect = CGRect(x: 0, y: 0, width: paperSize.widthMM * mmToPoint, height: paperSize.heightMM * mmToPoint)
+        // 内容盒固定 74×126mm，水平居中、垂直顶部对齐放入外框。
+        let contentRect = contentRect(in: pageRect, paperSize: paperSize)
         guard let consumer = CGDataConsumer(url: outputURL as CFURL),
               let context = CGContext(consumer: consumer, mediaBox: &pageRect, nil) else {
             throw NSError(domain: "Tabooprint", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot create PDF"])
         }
 
         if documents.isEmpty {
-            drawPage(context: context, pageRect: pageRect) {
+            drawPage(context: context, pageRect: pageRect, contentRect: contentRect) {
                 drawText("Tabooprint 空任务", at: CGPoint(x: 18, y: 32), size: 16, weight: .bold)
                 drawText("requestID: \(requestID)", at: CGPoint(x: 18, y: 62), size: 8, weight: .regular)
                 drawText("taskID: \(taskID)", at: CGPoint(x: 18, y: 76), size: 8, weight: .regular)
             }
         } else {
             for (index, document) in documents.enumerated() {
-                drawDocument(context: context, pageRect: pageRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count)
+                drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count)
             }
         }
         context.closePDF()
         return RenderResult(url: outputURL, fileName: fileName, documentIds: ids, error: nil)
+    }
+
+    /// 把 74×126mm 内容盒水平居中、顶部对齐放入纸张外框。
+    private func contentRect(in pageRect: CGRect, paperSize: PaperSize) -> CGRect {
+        let contentWidth = contentWidthMM * mmToPoint
+        let contentHeight = contentHeightMM * mmToPoint
+        let originX = max(0, (pageRect.width - contentWidth) / 2)
+        // 顶部对齐：PDF 坐标系原点在左下，内容盒顶边贴纸张顶边。
+        let originY = max(0, pageRect.height - contentHeight)
+        return CGRect(x: originX, y: originY, width: contentWidth, height: contentHeight)
     }
 
     func writeFallbackPDF(outputDirectory: URL, requestID: String, taskID: String) -> RenderResult {
@@ -941,8 +954,8 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         return Data(text.utf8)
     }
 
-    private func drawDocument(context: CGContext, pageRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int) {
-        drawPage(context: context, pageRect: pageRect) {
+    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int) {
+        drawPage(context: context, pageRect: pageRect, contentRect: contentRect) {
             let parts = splitContents(document)
             let decrypted = decryptWaybillContent(parts.standard)
             let customData = parts.custom.object("data")
@@ -959,12 +972,13 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         }
     }
 
-    private func drawPage(context: CGContext, pageRect: CGRect, draw: () -> Void) {
+    private func drawPage(context: CGContext, pageRect: CGRect, contentRect: CGRect, draw: () -> Void) {
         context.beginPDFPage(nil)
         context.saveGState()
         context.setFillColor(NSColor.white.cgColor)
         context.fill(pageRect)
-        context.translateBy(x: 0, y: pageRect.height)
+        // 平移到内容盒左上角，使内 mm() 绝对坐标落在居中/顶部对齐后的内容盒内。
+        context.translateBy(x: contentRect.minX, y: contentRect.minY + contentRect.height)
         context.scaleBy(x: 1, y: -1)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: true)
@@ -1146,9 +1160,11 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         let showItem = customData.bool("showItemInfo") ?? true
         let itemText = showItem ? customData.string("ITEM_INFO") : customData.string("PAGE_PRINT_TIPS")
         let itemFontSize = min(4.2, max(2.6, (Double(customData.string("itemInfoFontSize")) ?? 10) * 0.32))
-        drawTemplateText(itemText, x: 5.4, y: 76.6, width: 62, height: 19.5, size: itemFontSize, weight: .bold, wrap: true)
-        drawTemplateText(customData.string("SELLER_MEMO"), x: 0.1, y: 97, width: 30, height: 9, size: 2.7, wrap: true)
-        drawTemplateText(customData.string("BUYER_MEMO"), x: 29.614, y: 97, width: 30, height: 9, size: 2.7, wrap: true)
+        let contentX: CGFloat = 5.4
+        let contentWidth: CGFloat = 53.2
+        drawTemplateText(itemText, x: contentX, y: 76.6, width: 62, height: 7.4, size: itemFontSize, weight: .bold, wrap: true)
+        drawTemplateText(customData.string("SELLER_MEMO"), x: contentX, y: 85.0, width: contentWidth, height: 7.0, size: 2.5, wrap: true)
+        drawTemplateText(customData.string("BUYER_MEMO"), x: contentX, y: 92.8, width: contentWidth, height: 7.0, size: 2.5, wrap: true)
         drawTemplateText(customData.string("ITEM_TOTAL_COUNT"), x: 58.8, y: 97, width: 10.6, height: 9, size: 6.8, weight: .bold, fill: .darkGray, align: .center, valign: .middle)
     }
 
