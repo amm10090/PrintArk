@@ -6,6 +6,8 @@ struct LabelPreviewWorkspace: View {
     let pdfURL: URL?
 
     @AppStorage(SettingsKeys.printMedia) private var printMedia = "100x180mm"
+    @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = false
+    @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = false
     @State private var samplePDFURL: URL?
 
     private var paperSize: PaperSize {
@@ -43,7 +45,7 @@ struct LabelPreviewWorkspace: View {
 
     @MainActor
     private func generateSamplePDF() -> URL {
-        (try? WaybillPreviewSamplePDF.writeSample()) ?? Self.placeholderSampleURL
+        (try? WaybillPreviewSamplePDF.writeSample(hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage)) ?? Self.placeholderSampleURL
     }
 
     var body: some View {
@@ -70,6 +72,14 @@ struct LabelPreviewWorkspace: View {
             guard pdfURL == nil, samplePDFURL == nil else { return }
             samplePDFURL = generateSamplePDF()
         }
+        .onChange(of: hideTaoLogo) { _ in
+            guard pdfURL == nil else { return }
+            samplePDFURL = generateSamplePDF()
+        }
+        .onChange(of: hideCourierPackage) { _ in
+            guard pdfURL == nil else { return }
+            samplePDFURL = generateSamplePDF()
+        }
     }
 }
 
@@ -92,13 +102,17 @@ enum WaybillPreviewSamplePDF {
         .appendingPathComponent("tabooprint", isDirectory: true)
         .appendingPathComponent("preview-samples", isDirectory: true)
 
-    static func writeSample(to outputDirectory: URL = sampleDirectory) throws -> URL {
+    static func writeSample(to outputDirectory: URL = sampleDirectory, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false) throws -> URL {
         let renderer = NativeWaybillRenderer()
+        // 文件名随开关状态变化，确保 URL 改变后 PDFView 一定重新加载。
+        let variantTaskID = "\(taskID)-\(hideTaoLogo ? "1" : "0")\(hideCourierPackage ? "1" : "0")"
         let result = try renderer.render(
             payload: try samplePayload(for: .sample),
             outputDirectory: outputDirectory,
             requestID: requestID,
-            taskID: taskID
+            taskID: variantTaskID,
+            hideTaoLogo: hideTaoLogo,
+            hideCourierPackage: hideCourierPackage
         )
         return result.url
     }

@@ -72,6 +72,7 @@ final class NativePrintService: @unchecked Sendable {
     private var logLines: [String] = []
     private var renderedPDFs: [String: URL] = [:]
     private var physicalPrintHistory: [String: PhysicalPrintHistoryItem] = [:]
+    private var lastRenderContext: (payload: [String: JSONValue], requestID: String, taskID: String)?
     private var lastError = ""
     private let renderer = NativeWaybillRenderer()
     private let renderedDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -193,6 +194,42 @@ final class NativePrintService: @unchecked Sendable {
         let startResult = start(configuration: configuration)
         let output = [stopResult.output, startResult.output].filter { !$0.isEmpty }.joined(separator: "\n")
         return CommandResult(exitCode: startResult.exitCode, output: output)
+    }
+
+    /// 应用最新的打印设置，并在已有渲染上下文时按新设置重渲染最近一张面单。
+    /// 返回是否实际重绘了预览。
+    @discardableResult
+    func applyPrintSettings(_ settings: PrintSettings) -> Bool {
+        let context = lock.withLock { () -> (payload: [String: JSONValue], requestID: String, taskID: String)? in
+            configuration = PrintServiceConfiguration(
+                host: configuration.host,
+                webSocketPort: configuration.webSocketPort,
+                httpPort: configuration.httpPort,
+                runtimeMode: configuration.runtimeMode,
+                autoOpenPreview: configuration.autoOpenPreview,
+                printSettings: settings
+            )
+            return lastRenderContext
+        }
+        guard let context else { return false }
+        let docs = context.payload.object("task").array("documents").compactMap(\.objectValue).enumerated().map { index, document in
+            ProtocolDocument(
+                documentId: document.string("documentID", default: document.string("documentId", default: "MOCK_DOC_\(index + 1)")),
+                fingerprint: buildDocumentFingerprint(document),
+                index: index
+            )
+        }
+        guard !docs.isEmpty else { return false }
+        _ = renderWaybill(
+            payload: context.payload,
+            requestID: context.requestID,
+            taskID: context.taskID,
+            docs: docs,
+            paperSize: PaperCatalog.match(media: settings.media),
+            hideTaoLogo: settings.hideTaoLogo,
+            hideCourierPackage: settings.hideCourierPackage
+        )
+        return true
     }
 
     func snapshot() -> SupervisorSnapshot {
@@ -404,7 +441,7 @@ final class NativePrintService: @unchecked Sendable {
             "pending": .number(45),
             "rendering": .number(160),
         ]
-        let renderResult = renderWaybill(payload: payload, requestID: requestID, taskID: taskID, docs: docs, paperSize: PaperCatalog.match(media: config.printSettings.media))
+        let renderResult = renderWaybill(payload: payload, requestID: requestID, taskID: taskID, docs: docs, paperSize: PaperCatalog.match(media: config.printSettings.media), hideTaoLogo: config.printSettings.hideTaoLogo, hideCourierPackage: config.printSettings.hideCourierPackage)
         let previewURL = "http://localhost:\(config.httpPort)/file/\(renderResult.fileName)"
         var physicalPrintJob: PhysicalPrintJob?
 
@@ -572,11 +609,12 @@ final class NativePrintService: @unchecked Sendable {
         channel.writeAndFlush(frame, promise: nil)
     }
 
-    private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument], paperSize: PaperSize) -> RenderResult {
+    private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument], paperSize: PaperSize, hideTaoLogo: Bool, hideCourierPackage: Bool) -> RenderResult {
         do {
-            let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize)
+            let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage)
             lock.withLock {
                 renderedPDFs[result.fileName] = result.url
+                lastRenderContext = (payload: payload, requestID: requestID, taskID: taskID)
             }
             emit("render", [
                 "phase": .string("success"),
@@ -882,7 +920,7 @@ final class NativeWaybillRenderer: @unchecked Sendable {
     private let contentHeightMM: CGFloat = WaybillContentBox.heightMM
     private let mmToPoint: CGFloat = 72 / 25.4
 
-    func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String, paperSize: PaperSize = PaperCatalog.default) throws -> RenderResult {
+    func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String, paperSize: PaperSize = PaperCatalog.default, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false) throws -> RenderResult {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         let fileName = "\(safeFilename(taskID)).pdf"
         let outputURL = outputDirectory.appendingPathComponent(fileName)
@@ -909,7 +947,7 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             }
         } else {
             for (index, document) in documents.enumerated() {
-                drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count)
+                drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage)
             }
         }
         context.closePDF()
@@ -954,7 +992,7 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         return Data(text.utf8)
     }
 
-    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int) {
+    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int, hideTaoLogo: Bool, hideCourierPackage: Bool) {
         drawPage(context: context, pageRect: pageRect, contentRect: contentRect) {
             let parts = splitContents(document)
             let decrypted = decryptWaybillContent(parts.standard)
@@ -967,7 +1005,9 @@ final class NativeWaybillRenderer: @unchecked Sendable {
                 customData: customData,
                 documentID: docID,
                 pageNumber: index + 1,
-                pageCount: count
+                pageCount: count,
+                hideTaoLogo: hideTaoLogo,
+                hideCourierPackage: hideCourierPackage
             )
         }
     }
@@ -1024,12 +1064,18 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         customData: [String: JSONValue],
         documentID: String,
         pageNumber: Int,
-        pageCount: Int
+        pageCount: Int,
+        hideTaoLogo: Bool,
+        hideCourierPackage: Bool
     ) {
         let values = buildTemplateValues(data: data, standard: standard, customData: customData, documentID: documentID, pageNumber: pageNumber, pageCount: pageCount)
         strokeMMRect(x: 5, y: 0.6, width: 65, height: 125.4, lineWidth: 0.4)
-        drawTemplateText("淘", x: 6.4, y: 2.58, width: 6.92, height: 5.31, size: 5.4, weight: .bold, align: .center, valign: .middle)
-        drawTemplateText("快递\n包裹", x: 59, y: 0.8, width: 11, height: 11, size: 5.4, weight: .bold, align: .center, valign: .middle)
+        if !hideTaoLogo {
+            drawTemplateText("淘", x: 6.4, y: 2.58, width: 6.92, height: 5.31, size: 5.4, weight: .bold, align: .center, valign: .middle)
+        }
+        if !hideCourierPackage {
+            drawTemplateText("快递\n包裹", x: 59, y: 0.8, width: 11, height: 11, size: 5.4, weight: .bold, align: .center, valign: .middle)
+        }
         drawRotatedTemplateText(values.waybillCode, x: 0.6, y: 22, angle: 90, size: 3.2)
         drawRotatedTemplateText(values.waybillCode, x: 74.1, y: 22, angle: 90, size: 3.2)
         drawTemplateText(values.dateText, x: 5.8, y: 9, width: 13.4, height: 3, size: 2.7)

@@ -9,6 +9,8 @@ struct PrintPipelineInspector: View {
     @AppStorage(SettingsKeys.printFitToPage) private var fitToPage = true
     @AppStorage(SettingsKeys.printDedupe) private var duplicateProtection = true
     @AppStorage(SettingsKeys.dedupeWindowMinutes) private var duplicateWindowMinutes = 10
+    @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = false
+    @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = false
 
     private var printers: [PrinterDevice] {
         var devices = model.printerDevices
@@ -46,18 +48,17 @@ struct PrintPipelineInspector: View {
                     printers: printers
                 )
 
-                DeduplicationCard(
-                    printerName: selectedPrinter.name,
-                    printMedia: printMedia,
-                    fitToPage: fitToPage,
-                    enabled: duplicateProtection,
-                    windowMinutes: duplicateWindowMinutes
+                LabelContentCard(
+                    model: model,
+                    hideTaoLogo: $hideTaoLogo,
+                    hideCourierPackage: $hideCourierPackage
                 )
 
                 RecentJobsCard(jobs: model.printJobs)
 
                 FutureBatchCard()
             }
+            .frame(maxWidth: .infinity)
             .padding(18)
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -89,7 +90,7 @@ struct PipelineSettingsCard: View {
     }
 
     var body: some View {
-        SettingsCard(title: "打印管线", subtitle: "对应当前 macOS lpr 打印链路。") {
+        SettingsCard(title: "打印设置", subtitle: "面单的打印机和纸张选项。") {
             VStack(spacing: 14) {
                 Picker("打印机", selection: $printerName) {
                     ForEach(printers) { printer in
@@ -117,7 +118,7 @@ struct PipelineSettingsCard: View {
                     }
                 }
 
-                Text("传给 lpr -o media=\(selectedPaperSize.media)，纸张外框 \(selectedPaperSize.sizeText)。")
+                Text("纸张尺寸 \(selectedPaperSize.sizeText)。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -129,9 +130,9 @@ struct PipelineSettingsCard: View {
                 }
                 .pickerStyle(.segmented)
 
-                Toggle("页面适配 fit-to-page", isOn: $fitToPage)
+                Toggle("自动缩放以适应纸张", isOn: $fitToPage)
 
-                Toggle("重复打印保护", isOn: $duplicateProtection)
+                Toggle("避免重复打印", isOn: $duplicateProtection)
 
                 if duplicateProtection {
                     Stepper("保护窗口：\(duplicateWindowMinutes) 分钟", value: $duplicateWindowMinutes, in: 1...60)
@@ -141,28 +142,21 @@ struct PipelineSettingsCard: View {
     }
 }
 
-struct DeduplicationCard: View {
-    let printerName: String
-    let printMedia: String
-    let fitToPage: Bool
-    let enabled: Bool
-    let windowMinutes: Int
+struct LabelContentCard: View {
+    @ObservedObject var model: AppModel
+    @Binding var hideTaoLogo: Bool
+    @Binding var hideCourierPackage: Bool
 
     var body: some View {
-        SettingsCard(title: "去重依据", subtitle: "这些字段共同决定是否跳过重复打印。") {
-            VStack(alignment: .leading, spacing: 9) {
-                HStack {
-                    StatusText(text: enabled ? "已启用" : "已关闭", color: enabled ? .green : .secondary)
-                    StatusText(text: "\(windowMinutes) 分钟窗口", color: .secondary)
-                    Spacer()
-                }
+        SettingsCard(title: "面单内容", subtitle: "选择是否打印这些标记。") {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("不打印左上角的“淘”字", isOn: $hideTaoLogo)
+                    .onChange(of: hideTaoLogo) { _ in model.applyPrintSettings() }
 
-                DedupKeyRow("打印机：\(printerName)")
-                DedupKeyRow("纸张参数：\(printMedia.isEmpty ? "(default-media)" : printMedia)")
-                DedupKeyRow("fit-to-page：\(fitToPage ? "fit" : "nofit")")
-                DedupKeyRow("documentID")
-                DedupKeyRow("面单内容指纹")
+                Toggle("不打印右上角的“快递包裹”", isOn: $hideCourierPackage)
+                    .onChange(of: hideCourierPackage) { _ in model.applyPrintSettings() }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -191,13 +185,13 @@ struct RecentJobsCard: View {
     let jobs: [PrintJob]
 
     var body: some View {
-        SettingsCard(title: "最近任务", subtitle: "用于排查 PDF 路径、lpr 状态和去重结果。") {
+        SettingsCard(title: "最近任务", subtitle: "查看每次打印的文件和结果。") {
             if jobs.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("等待 print payload", systemImage: "tray")
+                    Label("等待打印任务", systemImage: "tray")
                         .font(.subheadline.weight(.semibold))
 
-                    Text("千牛提交后会显示 PDF 路径、lpr 命令和去重结果。")
+                    Text("从千牛提交后，这里会显示打印的文件和结果。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -268,12 +262,12 @@ struct RecentJobRow: View {
 
 struct FutureBatchCard: View {
     var body: some View {
-        SettingsCard(title: "后续批量能力", subtitle: "当前支持 payload 内多个 documents；导入能力可作为下一阶段。") {
+        SettingsCard(title: "后续批量能力", subtitle: "当前可处理一次提交里的多张面单；批量导入将在后续版本提供。") {
             VStack(alignment: .leading, spacing: 10) {
-                FutureRow(title: "CSV / Excel 导入", detail: "后续解析为 documents")
-                FutureRow(title: "字段映射", detail: "后续映射 waybillCode、地址、备注等字段")
-                FutureRow(title: "批量预览", detail: "payload 内多个 documents 当前可进入渲染")
-                FutureRow(title: "批量打印", detail: "后续统一提交到 macOS lpr")
+                FutureRow(title: "CSV / Excel 导入", detail: "后续解析为多张面单")
+                FutureRow(title: "字段映射", detail: "后续映射运单号、地址、备注等字段")
+                FutureRow(title: "批量预览", detail: "一次提交里的多张面单当前可进入预览")
+                FutureRow(title: "批量打印", detail: "后续支持一次性打印多个面单")
                 FutureRow(title: "失败重试", detail: "后续对失败任务单独重试")
             }
         }

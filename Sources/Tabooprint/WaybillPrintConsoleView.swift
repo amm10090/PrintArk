@@ -108,7 +108,7 @@ enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
         case .currentWaybill: return "当前面单"
         case .printQueue: return "打印队列"
         case .recentTasks: return "最近任务"
-        case .payloadDocuments: return "Payload 多文档"
+        case .payloadDocuments: return "多面单文档"
         case .currentVersion: return "当前版本"
         case .csvImport: return "CSV / Excel 导入"
         case .fieldMapping: return "字段映射"
@@ -197,7 +197,7 @@ struct PrintWorkspaceContent: View {
         case .printQueue:
             SidebarPage(
                 title: "打印队列",
-                subtitle: model.printJobs.isEmpty ? "等待新的打印 payload。" : "最近 \(model.printJobs.count) 个打印任务。",
+                subtitle: model.printJobs.isEmpty ? "等待新的打印任务。" : "最近 \(model.printJobs.count) 个打印任务。",
                 systemImage: "tray.full"
             ) {
                 RecentJobsCard(jobs: model.printJobs)
@@ -212,8 +212,8 @@ struct PrintWorkspaceContent: View {
             }
         case .payloadDocuments:
             SidebarPage(
-                title: "Payload 多文档",
-                subtitle: "当前支持 payload 内多个 documents。",
+                title: "多面单文档",
+                subtitle: "当前支持一次提交里的多张面单。",
                 systemImage: "doc.on.doc"
             ) {
                 PayloadDocumentsCard(tasks: model.recentTasks)
@@ -326,10 +326,10 @@ struct PayloadDocumentsCard: View {
     let tasks: [RecentTask]
 
     var body: some View {
-        SettingsCard(title: "支持范围", subtitle: "当前 payload 能力。") {
+        SettingsCard(title: "支持范围", subtitle: "当前可处理的面单能力。") {
             VStack(alignment: .leading, spacing: 9) {
-                DedupKeyRow("payload 内多个 documents")
-                DedupKeyRow("多文档逐个渲染 PDF")
+                DedupKeyRow("一次提交里的多张面单")
+                DedupKeyRow("多张面单逐个生成预览")
                 DedupKeyRow("最近文档数：\(tasks.first?.documentCountText ?? "0")")
             }
             .frame(maxWidth: .infinity, alignment: .leading)

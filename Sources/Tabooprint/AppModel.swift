@@ -10,6 +10,8 @@ enum SettingsKeys {
     static let printFitToPage = "tabooprint.printFitToPage"
     static let printDedupe = "tabooprint.printDedupe"
     static let dedupeWindowMinutes = "tabooprint.dedupeWindowMinutes"
+    static let printHideTaoLogo = "tabooprint.printHideTaoLogo"
+    static let printHideCourierPackage = "tabooprint.printHideCourierPackage"
 }
 
 enum RuntimeMode: String, CaseIterable, Identifiable {
@@ -155,6 +157,8 @@ struct PrintSettings {
     var fitToPage: Bool
     var dedupe: Bool
     var dedupeWindowMinutes: Int
+    var hideTaoLogo: Bool = false
+    var hideCourierPackage: Bool = false
 
     static var current: PrintSettings {
         let defaults = UserDefaults.standard
@@ -164,13 +168,17 @@ struct PrintSettings {
         let fitToPage = defaults.object(forKey: SettingsKeys.printFitToPage) as? Bool ?? true
         let dedupe = defaults.object(forKey: SettingsKeys.printDedupe) as? Bool ?? true
         let dedupeWindowMinutes = defaults.object(forKey: SettingsKeys.dedupeWindowMinutes) as? Int ?? 10
+        let hideTaoLogo = defaults.object(forKey: SettingsKeys.printHideTaoLogo) as? Bool ?? false
+        let hideCourierPackage = defaults.object(forKey: SettingsKeys.printHideCourierPackage) as? Bool ?? false
         return PrintSettings(
             printerName: printerName.isEmpty ? "TAOBAO" : printerName,
             media: media,
             dryRun: dryRun,
             fitToPage: fitToPage,
             dedupe: dedupe,
-            dedupeWindowMinutes: dedupeWindowMinutes
+            dedupeWindowMinutes: dedupeWindowMinutes,
+            hideTaoLogo: hideTaoLogo,
+            hideCourierPackage: hideCourierPackage
         )
     }
 }
@@ -221,6 +229,15 @@ final class AppModel: NSObject, ObservableObject {
 
     func restartService() {
         launchService(action: .restart)
+    }
+
+    /// 立即应用当前打印设置，并在可能时重渲染最近一张真实面单预览。
+    func applyPrintSettings() {
+        let didRerender = printService.applyPrintSettings(PrintSettings.current)
+        apply(snapshot: printService.snapshot())
+        if didRerender {
+            lastActionOutput = "已按新设置更新预览"
+        }
     }
 
     func openLatestPreview() {
