@@ -8,9 +8,13 @@ let package = Package(
         .macOS(.v13),
     ],
     products: [
+        .library(
+            name: "TabooprintKit",
+            targets: ["Tabooprint"]
+        ),
         .executable(
             name: "Tabooprint",
-            targets: ["Tabooprint"]
+            targets: ["TabooprintApp"]
         ),
     ],
     dependencies: [
@@ -18,7 +22,7 @@ let package = Package(
         .package(url: "https://github.com/krzyzanowskim/CryptoSwift.git", from: "1.8.3"),
     ],
     targets: [
-        .executableTarget(
+        .target(
             name: "Tabooprint",
             dependencies: [
                 .product(name: "NIOCore", package: "swift-nio"),
@@ -30,6 +34,13 @@ let package = Package(
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],
+        ),
+        .executableTarget(
+            name: "TabooprintApp",
+            dependencies: ["Tabooprint"],
+            swiftSettings: [
+                .enableUpcomingFeature("ApproachableConcurrency"),
+            ]
         ),
         .testTarget(
             name: "TabooprintTests",

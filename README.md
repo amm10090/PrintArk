@@ -24,6 +24,15 @@ rtk .build/debug/Tabooprint --service-only --auto-open-preview false
 
 Launch the built app from Xcode or the generated SwiftPM product for the menu bar UI. Use `--service-only` for protocol replay and command-line verification.
 
+## Xcode Previews
+
+The package now exposes:
+
+- executable product `Tabooprint`
+- library product `TabooprintKit`
+
+If Xcode refuses to preview SwiftUI views from the executable product, use the library-backed preview/build boundary from `TabooprintKit`. The service binary and command-line smoke tests still run through `Tabooprint`.
+
 ## Notes
 
 - `raw_capture_artifacts/` is treated as evidence and not mutated.

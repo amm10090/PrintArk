@@ -317,7 +317,6 @@ struct ItemBlock: View {
         VStack(spacing: 7) {
             InfoLine(label: "商品信息", value: document.itemInfo)
             InfoLine(label: "商品数量", value: document.itemTotalCount)
-            InfoLine(label: "订单号", value: document.orderID)
             InfoLine(label: "买家昵称", value: document.buyerNick)
             InfoLine(label: "买家备注", value: document.buyerMemo)
             InfoLine(label: "卖家备注", value: document.sellerMemo)
@@ -444,3 +443,20 @@ struct TechnicalSpecItem: View {
         .frame(minWidth: 96, alignment: .leading)
     }
 }
+
+#if DEBUG
+struct LabelPreviewWorkspace_Previews: PreviewProvider {
+    static var previews: some View {
+        Group {
+            LabelPreviewWorkspace(pdfURL: nil)
+                .frame(width: 760, height: 720)
+                .previewDisplayName("预览工作台")
+
+            WaybillCanvas(document: .sample)
+                .padding(32)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .previewDisplayName("面单画布")
+        }
+    }
+}
+#endif

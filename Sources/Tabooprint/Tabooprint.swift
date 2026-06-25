@@ -2,10 +2,9 @@ import AppKit
 import Darwin
 import SwiftUI
 
-@main
 @MainActor
-struct TabooprintApp {
-    static func main() {
+package enum TabooprintDesktopLauncher {
+    package static func main() {
         if ServiceOnlyRunner.runIfRequested() {
             return
         }

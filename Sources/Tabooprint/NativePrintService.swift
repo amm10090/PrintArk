@@ -1014,13 +1014,13 @@ final class NativeWaybillRenderer: @unchecked Sendable {
     ) {
         let values = buildTemplateValues(data: data, standard: standard, customData: customData, documentID: documentID, pageNumber: pageNumber, pageCount: pageCount)
         strokeMMRect(x: 5, y: 0.6, width: 65, height: 125.4, lineWidth: 0.4)
-        drawTemplateText("淘", x: 26.32, y: 2.58, width: 6.92, height: 5.31, size: 5.4, weight: .bold, align: .center, valign: .middle)
+        drawTemplateText("淘", x: 6.4, y: 2.58, width: 6.92, height: 5.31, size: 5.4, weight: .bold, align: .center, valign: .middle)
         drawTemplateText("快递\n包裹", x: 59, y: 0.8, width: 11, height: 11, size: 5.4, weight: .bold, align: .center, valign: .middle)
         drawRotatedTemplateText(values.waybillCode, x: 0.6, y: 22, angle: 90, size: 3.2)
-        drawRotatedTemplateText(values.waybillCode, x: 71.6, y: 22, angle: 90, size: 3.2)
-        drawTemplateText(values.dateText, x: 2.06, y: 9, width: 14, height: 3, size: 2.7, align: .right)
-        drawTemplateText(values.timeText, x: 17.06, y: 9, width: 13, height: 3, size: 2.7, align: .center)
-        drawTemplateText("第\(pageNumber)/\(pageCount)个", x: 31.15, y: 9, width: 16.03, height: 3, size: 2.7)
+        drawRotatedTemplateText(values.waybillCode, x: 74.1, y: 22, angle: 90, size: 3.2)
+        drawTemplateText(values.dateText, x: 5.8, y: 9, width: 13.4, height: 3, size: 2.7)
+        drawTemplateText(values.timeText, x: 20.2, y: 9, width: 11.8, height: 3, size: 2.7, align: .center)
+        drawTemplateText("第\(pageNumber)/\(pageCount)个", x: 34, y: 9, width: 16.03, height: 3, size: 2.7)
         drawTemplateText(values.datoubi.isEmpty ? "分拣码" : values.datoubi, x: 7.33, y: 12.24, width: 61, height: 8.41, size: 7, weight: .bold, align: .center, valign: .bottom)
         drawCode128(value: values.waybillCode, x: 8.65, y: 21.76, width: 57.85, height: 15.56, showText: true)
         drawTemplateText(values.consolidation, x: 12.86, y: 37.98, width: 27.44, height: 6.83, size: 5.2, weight: .bold, valign: .middle)
@@ -1080,7 +1080,6 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             drawTemplateText(values.privacyNumber, x: 20.86, y: 45.3, width: 42.47, height: 4.81, size: 4.3, weight: .bold, valign: .middle)
         }
 
-        drawTemplateText("已验视", x: 58.57, y: 101.39, width: 11, height: 3, size: 2.6)
         drawCustomArea(customData)
     }
 
@@ -1150,8 +1149,7 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         drawTemplateText(itemText, x: 5.4, y: 76.6, width: 62, height: 19.5, size: itemFontSize, weight: .bold, wrap: true)
         drawTemplateText(customData.string("SELLER_MEMO"), x: 0.1, y: 97, width: 30, height: 9, size: 2.7, wrap: true)
         drawTemplateText(customData.string("BUYER_MEMO"), x: 29.614, y: 97, width: 30, height: 9, size: 2.7, wrap: true)
-        drawTemplateText(customData.string("ITEM_TOTAL_COUNT"), x: 59.372, y: 97, width: 15, height: 9, size: 7.4, weight: .bold, fill: .darkGray, align: .center, valign: .middle)
-        drawTemplateText(customData.string("ORDER_ID"), x: 5.4, y: 106.8, width: 64, height: 3.5, size: 2.6)
+        drawTemplateText(customData.string("ITEM_TOTAL_COUNT"), x: 58.8, y: 97, width: 10.6, height: 9, size: 6.8, weight: .bold, fill: .darkGray, align: .center, valign: .middle)
     }
 
     private func drawTemplateText(

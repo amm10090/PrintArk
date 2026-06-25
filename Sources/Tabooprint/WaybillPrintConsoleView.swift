@@ -3,6 +3,7 @@ import SwiftUI
 struct WaybillPrintConsoleView: View {
     @ObservedObject var model: AppModel
     @State private var sidebarSelection: PrintSidebarDestination? = .currentWaybill
+    @State private var isServicePanelPresented = false
     @AppStorage(SettingsKeys.printerName) private var printerName = "TAOBAO"
     @AppStorage(SettingsKeys.printDryRun) private var printDryRun = true
 
@@ -11,47 +12,82 @@ struct WaybillPrintConsoleView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            PrintSidebarView(selection: $sidebarSelection)
-                .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 280)
-        } content: {
-            PrintWorkspaceContent(selection: sidebarSelection ?? .currentWaybill, model: model)
-        } detail: {
-            PrintPipelineInspector(model: model)
-                .navigationSplitViewColumnWidth(min: 360, ideal: 390, max: 440)
+        VStack(spacing: 0) {
+            ConsoleTopBar(
+                model: model,
+                selectedPrinter: selectedPrinter,
+                printDryRun: printDryRun,
+                isServicePanelPresented: $isServicePanelPresented
+            )
+
+            Divider()
+
+            NavigationSplitView {
+                PrintSidebarView(selection: $sidebarSelection)
+                    .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 280)
+            } content: {
+                PrintWorkspaceContent(selection: sidebarSelection ?? .currentWaybill, model: model)
+            } detail: {
+                PrintPipelineInspector(model: model)
+                    .navigationSplitViewColumnWidth(min: 360, ideal: 390, max: 440)
+            }
         }
         .frame(minWidth: 1240, minHeight: 780)
-        .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
-                Label("面单打印", systemImage: "printer.fill")
-                    .font(.headline)
-            }
+    }
+}
 
-            ToolbarItemGroup(placement: .primaryAction) {
+struct ConsoleTopBar: View {
+    @ObservedObject var model: AppModel
+    let selectedPrinter: PrinterDevice
+    let printDryRun: Bool
+    @Binding var isServicePanelPresented: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Label("面单打印", systemImage: "printer.fill")
+                .font(.headline)
+
+            Spacer()
+
+            Button {
+                isServicePanelPresented.toggle()
+            } label: {
                 PipelineStateBadge(state: model.serviceState)
-
-                PrinterStatusBadge(printer: selectedPrinter)
-
-                Button(action: model.refresh) {
-                    Label("刷新打印机", systemImage: "arrow.clockwise")
-                }
-
-                Button(action: model.openLatestPreview) {
-                    Label("打开最新预览", systemImage: "doc.richtext")
-                }
-                .disabled(model.latestPreviewPDF == nil)
-
-                Button(action: model.stopService) {
-                    Label("停止", systemImage: "stop.fill")
-                }
-                .disabled(model.serviceState == .stopped || model.serviceState == .stopping)
-
-                Button(action: model.restartService) {
-                    Label(printDryRun ? "启动模拟打印" : "启动真实打印", systemImage: "paperplane.fill")
-                }
-                .buttonStyle(.borderedProminent)
             }
+            .buttonStyle(.plain)
+            .help("本机服务")
+            .popover(isPresented: $isServicePanelPresented, arrowEdge: .bottom) {
+                ServiceControlsPanel(model: model, printDryRun: printDryRun)
+            }
+
+            PrinterStatusBadge(printer: selectedPrinter)
+
+            Button(action: model.refresh) {
+                Label("刷新", systemImage: "arrow.clockwise")
+            }
+            .help("刷新打印机和服务状态")
+
+            Button(action: model.openLatestPreview) {
+                Label("打开预览", systemImage: "doc.richtext")
+            }
+            .disabled(model.latestPreviewPDF == nil)
+            .help("打开最新预览 PDF")
+
+            Button(action: model.stopService) {
+                Label("停止", systemImage: "stop.fill")
+            }
+            .disabled(model.serviceState == .stopped || model.serviceState == .stopping)
+            .help("停止本机服务")
+
+            Button(action: model.restartService) {
+                Label(printDryRun ? "模拟打印" : "真实打印", systemImage: "paperplane.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .help(printDryRun ? "启动模拟打印" : "启动真实打印")
         }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .background(.regularMaterial)
     }
 }
 
@@ -111,78 +147,34 @@ struct PrintSidebarView: View {
     @Binding var selection: PrintSidebarDestination?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                SidebarSection(title: "打印") {
-                    ForEach(PrintSidebarDestination.printItems) { item in
-                        SidebarActionRow(item: item, selection: $selection)
-                    }
-                }
-
-                SidebarSection(title: "批量能力") {
-                    ForEach(PrintSidebarDestination.batchItems) { item in
-                        SidebarActionRow(item: item, selection: $selection, isMuted: !item.isImplemented)
-                    }
-                }
-
-                SidebarSection(title: "说明") {
-                    ForEach(PrintSidebarDestination.infoItems) { item in
-                        SidebarActionRow(item: item, selection: $selection)
-                    }
+        List(selection: $selection) {
+            Section("打印") {
+                ForEach(PrintSidebarDestination.printItems) { item in
+                    SidebarRow(item: item)
+                        .tag(item)
+                        .help(item.title)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 18)
+
+            Section("批量能力") {
+                ForEach(PrintSidebarDestination.batchItems) { item in
+                    SidebarRow(item: item)
+                        .foregroundStyle(item.isImplemented ? .primary : .secondary)
+                        .tag(item)
+                        .help(item.isImplemented ? item.title : "尚未实现")
+                }
+            }
+
+            Section("说明") {
+                ForEach(PrintSidebarDestination.infoItems) { item in
+                    SidebarRow(item: item)
+                        .tag(item)
+                        .help(item.title)
+                }
+            }
         }
-        .background(Color(nsColor: .underPageBackgroundColor))
+        .listStyle(.sidebar)
         .navigationTitle("工作台")
-    }
-}
-
-struct SidebarSection<Content: View>: View {
-    let title: String
-    let content: Content
-
-    init(title: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
-
-            content
-        }
-    }
-}
-
-struct SidebarActionRow: View {
-    let item: PrintSidebarDestination
-    @Binding var selection: PrintSidebarDestination?
-    var isMuted = false
-
-    private var isSelected: Bool {
-        selection == item
-    }
-
-    var body: some View {
-        Button {
-            selection = item
-        } label: {
-            SidebarRow(item: item)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 7)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(isMuted && !isSelected ? .secondary : .primary)
-        .background(isSelected ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-        .help(isMuted ? "尚未实现" : item.title)
     }
 }
 
@@ -385,3 +377,117 @@ struct PipelineStateBadge: View {
             .background(color.opacity(0.12), in: Capsule())
     }
 }
+
+struct ServiceControlsPanel: View {
+    @ObservedObject var model: AppModel
+    let printDryRun: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("本机服务")
+                        .font(.headline)
+
+                    Text(model.serviceSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer()
+
+                PipelineStateBadge(state: model.serviceState)
+            }
+
+            HStack(spacing: 8) {
+                ForEach(model.ports) { port in
+                    StatusText(
+                        text: "\(port.label) \(port.stateText)",
+                        color: port.isListening ? .green : .secondary
+                    )
+                }
+
+                StatusText(text: "\(model.activeBrowserConnections) 个连接", color: .secondary)
+            }
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Button(action: model.restartService) {
+                    Label(printDryRun ? "模拟打印" : "真实打印", systemImage: "paperplane.fill")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button(action: model.stopService) {
+                    Label("停止", systemImage: "stop.fill")
+                }
+                .disabled(model.serviceState == .stopped || model.serviceState == .stopping)
+
+                Button(action: model.refresh) {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+
+                Button(action: model.openLatestPreview) {
+                    Label("预览", systemImage: "doc.richtext")
+                }
+                .disabled(model.latestPreviewPDF == nil)
+            }
+        }
+        .padding(16)
+        .frame(width: 380)
+    }
+}
+
+#if DEBUG
+@MainActor
+enum PreviewSamples {
+    static var consoleModel: AppModel {
+        let model = AppModel()
+        model.serviceState = .running
+        model.serviceSummary = "运行中 • WS 监听 · HTTP 监听 • 1 个浏览器连接"
+        model.ports = [
+            PortStatus(id: 13528, port: 13528, label: "WS", isListening: true, listenerCount: 1),
+            PortStatus(id: 13525, port: 13525, label: "HTTP", isListening: true, listenerCount: 1),
+        ]
+        model.activeBrowserConnections = 1
+        model.printerDevices = [
+            PrinterDevice(name: "TAOBAO 闲置", isDefault: true, isEnabled: true),
+            PrinterDevice(name: "Office PDF", isDefault: false, isEnabled: false),
+        ]
+        model.recentTasks = [
+            RecentTask(
+                id: "preview-demo",
+                timestampText: "09:34:33",
+                command: "print",
+                requestID: "REQ-DEMO-0001",
+                documentCount: 1,
+                mode: "physical-dry-run",
+                result: "physical-dry-run",
+                isInProgress: false
+            ),
+        ]
+        model.printJobs = [
+            PrintJob(
+                id: "job-demo",
+                waybillCode: "79013939670143",
+                printerName: "TAOBAO 闲置",
+                pdfPath: "/Users/amo/cainiao-x-print/preview/GA_REPLAY_1782351273403.pdf",
+                status: .dryRun,
+                errorMessage: nil,
+                commandText: "lpr -P 'TAOBAO 闲置' -o media=100x180mm -o fit-to-page"
+            ),
+        ]
+        model.lastRefreshedText = "2026-06-25 09:34:33"
+        return model
+    }
+}
+
+@MainActor
+struct WaybillPrintConsoleView_Previews: PreviewProvider {
+    static var previews: some View {
+        WaybillPrintConsoleView(model: PreviewSamples.consoleModel)
+            .frame(width: 1240, height: 780)
+    }
+}
+#endif
