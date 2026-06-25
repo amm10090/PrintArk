@@ -317,7 +317,23 @@ final class TabooprintTests: XCTestCase {
             "-o", "fit-to-page",
             "/tmp/tabooprint/waybills/TASK.pdf",
         ])
-        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|DOC1,DOC2|FP1,FP2")
+        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|noflip|DOC1,DOC2|FP1,FP2")
+    }
+
+    func testFlipPrintAddsOrientationArgAndDedupeKey() throws {
+        let settings = PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10, flipPrint: true)
+        let pdfURL = URL(fileURLWithPath: "/tmp/tabooprint/waybills/TASK.pdf")
+        let docs = [ProtocolDocument(documentId: "DOC1", fingerprint: "FP1", index: 0)]
+
+        // 反转通过 PDF 层 180° 旋转实现（见 makeRotatedPDFForPrinting），不再向 lpr 注入旋转选项，
+        // 因此 lpr 参数与非反转时一致；反转状态只体现在 dedupe key 上。
+        XCTAssertEqual(buildLprArgs(printerName: "TAOBAO", pdfURL: pdfURL, settings: settings), [
+            "-P", "TAOBAO",
+            "-o", "media=100x180mm",
+            "-o", "fit-to-page",
+            "/tmp/tabooprint/waybills/TASK.pdf",
+        ])
+        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|flip|DOC1|FP1")
     }
 
     func testDocumentFingerprintIncludesEncryptedAndCustomFields() throws {

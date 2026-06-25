@@ -84,21 +84,6 @@ enum PaperCatalog {
     }
 }
 
-enum PrintMode: String, CaseIterable, Identifiable {
-    case dryRun = "模拟打印"
-    case realPrint = "真实打印"
-
-    var id: String { rawValue }
-
-    var isDryRun: Bool {
-        self == .dryRun
-    }
-
-    init(dryRun: Bool) {
-        self = dryRun ? .dryRun : .realPrint
-    }
-}
-
 enum PrintJobStatus: String {
     case pending = "待打印"
     case dryRun = "模拟打印"

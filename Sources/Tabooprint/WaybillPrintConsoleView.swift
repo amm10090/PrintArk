@@ -5,7 +5,6 @@ struct WaybillPrintConsoleView: View {
     @State private var sidebarSelection: PrintSidebarDestination? = .currentWaybill
     @State private var isServicePanelPresented = false
     @AppStorage(SettingsKeys.printerName) private var printerName = "TAOBAO"
-    @AppStorage(SettingsKeys.printDryRun) private var printDryRun = true
 
     private var selectedPrinter: PrinterDevice {
         model.printerDevices.first(where: { $0.name == printerName }) ?? PrinterDevice(name: printerName, isDefault: false, isEnabled: true)
@@ -16,7 +15,6 @@ struct WaybillPrintConsoleView: View {
             ConsoleTopBar(
                 model: model,
                 selectedPrinter: selectedPrinter,
-                printDryRun: printDryRun,
                 isServicePanelPresented: $isServicePanelPresented
             )
 
@@ -39,7 +37,6 @@ struct WaybillPrintConsoleView: View {
 struct ConsoleTopBar: View {
     @ObservedObject var model: AppModel
     let selectedPrinter: PrinterDevice
-    let printDryRun: Bool
     @Binding var isServicePanelPresented: Bool
 
     var body: some View {
@@ -57,33 +54,16 @@ struct ConsoleTopBar: View {
             .buttonStyle(.plain)
             .help("本机服务")
             .popover(isPresented: $isServicePanelPresented, arrowEdge: .bottom) {
-                ServiceControlsPanel(model: model, printDryRun: printDryRun)
+                ServiceControlsPanel(model: model)
             }
 
             PrinterStatusBadge(printer: selectedPrinter)
 
-            Button(action: model.refresh) {
-                Label("刷新", systemImage: "arrow.clockwise")
-            }
-            .help("刷新打印机和服务状态")
-
-            Button(action: model.openLatestPreview) {
-                Label("打开预览", systemImage: "doc.richtext")
-            }
-            .disabled(model.latestPreviewPDF == nil)
-            .help("打开最新预览 PDF")
-
-            Button(action: model.stopService) {
-                Label("停止", systemImage: "stop.fill")
-            }
-            .disabled(model.serviceState == .stopped || model.serviceState == .stopping)
-            .help("停止本机服务")
-
             Button(action: model.restartService) {
-                Label(printDryRun ? "模拟打印" : "真实打印", systemImage: "paperplane.fill")
+                Label("重启服务", systemImage: "paperplane.fill")
             }
             .buttonStyle(.borderedProminent)
-            .help(printDryRun ? "启动模拟打印" : "启动真实打印")
+            .help("重启本机打印服务")
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
@@ -339,15 +319,62 @@ struct PayloadDocumentsCard: View {
 
 struct VersionSummaryCard: View {
     @ObservedObject var model: AppModel
+    @AppStorage(SettingsKeys.debugPreview) private var debugPreview = false
+    @AppStorage(SettingsKeys.printFlip) private var flipPrint = false
 
     var body: some View {
-        SettingsCard(title: "运行状态", subtitle: "当前本机服务。") {
-            VStack(alignment: .leading, spacing: 9) {
-                DedupKeyRow("服务：\(model.serviceState.title)")
-                DedupKeyRow("连接：\(model.activeBrowserConnections)")
-                DedupKeyRow("最新预览：\(model.latestPreviewPDF?.lastPathComponent ?? "-")")
+        VStack(spacing: 16) {
+            SettingsCard(title: "运行状态", subtitle: "当前本机服务。") {
+                VStack(alignment: .leading, spacing: 9) {
+                    DedupKeyRow("服务：\(model.serviceState.title)")
+                    DedupKeyRow("连接：\(model.activeBrowserConnections)")
+                    DedupKeyRow("最新预览：\(model.latestPreviewPDF?.lastPathComponent ?? "-")")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            SettingsCard(title: "调试选项", subtitle: "仅供开发调试，正常使用请保持关闭。") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("调试打印（不送打印机，仅生成 PDF 预览）", isOn: $debugPreview)
+                        .onChange(of: debugPreview) { _ in model.restartService() }
+
+                    Text(debugPreview
+                         ? "已开启：千牛打印请求只生成 PDF 预览，不会真实送到打印机。适合没有物理打印机的开发环境。"
+                         : "已关闭：千牛打印请求会真实送到打印机（默认行为）。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Divider()
+
+                    Toggle("反转打印（纸张180°反向放置时使用）", isOn: $flipPrint)
+                        .onChange(of: flipPrint) { _ in model.applyPrintSettings() }
+
+                    Text("仅作用于真实打印，预览不反转。用于快递面单纸反方向放置时，避免信息从纸张底部开始打印。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Divider()
+
+                    HStack(spacing: 8) {
+                        Button(action: model.refresh) {
+                            Label("刷新", systemImage: "arrow.clockwise")
+                        }
+
+                        Button(action: model.stopService) {
+                            Label("停止", systemImage: "stop.fill")
+                        }
+                        .disabled(model.serviceState == .stopped || model.serviceState == .stopping)
+
+                        Button(action: model.openLatestPreview) {
+                            Label("打开预览", systemImage: "doc.richtext")
+                        }
+                        .disabled(model.latestPreviewPDF == nil)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 }
@@ -380,7 +407,6 @@ struct PipelineStateBadge: View {
 
 struct ServiceControlsPanel: View {
     @ObservedObject var model: AppModel
-    let printDryRun: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -415,7 +441,7 @@ struct ServiceControlsPanel: View {
 
             HStack(spacing: 8) {
                 Button(action: model.restartService) {
-                    Label(printDryRun ? "模拟打印" : "真实打印", systemImage: "paperplane.fill")
+                    Label(model.serviceState == .running ? "重启服务" : "启动服务", systemImage: "paperplane.fill")
                 }
                 .buttonStyle(.borderedProminent)
 

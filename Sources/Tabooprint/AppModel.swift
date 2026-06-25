@@ -3,6 +3,7 @@ import Foundation
 
 enum SettingsKeys {
     static let runtimeMode = "tabooprint.runtimeMode"
+    static let debugPreview = "tabooprint.debugPreview"
     static let autoOpenPreview = "tabooprint.autoOpenPreview"
     static let printerName = "tabooprint.printerName"
     static let printMedia = "tabooprint.printMedia"
@@ -12,6 +13,7 @@ enum SettingsKeys {
     static let dedupeWindowMinutes = "tabooprint.dedupeWindowMinutes"
     static let printHideTaoLogo = "tabooprint.printHideTaoLogo"
     static let printHideCourierPackage = "tabooprint.printHideCourierPackage"
+    static let printFlip = "tabooprint.printFlip"
 }
 
 enum RuntimeMode: String, CaseIterable, Identifiable {
@@ -159,6 +161,7 @@ struct PrintSettings {
     var dedupeWindowMinutes: Int
     var hideTaoLogo: Bool = false
     var hideCourierPackage: Bool = false
+    var flipPrint: Bool = false
 
     static var current: PrintSettings {
         let defaults = UserDefaults.standard
@@ -170,6 +173,7 @@ struct PrintSettings {
         let dedupeWindowMinutes = defaults.object(forKey: SettingsKeys.dedupeWindowMinutes) as? Int ?? 10
         let hideTaoLogo = defaults.object(forKey: SettingsKeys.printHideTaoLogo) as? Bool ?? false
         let hideCourierPackage = defaults.object(forKey: SettingsKeys.printHideCourierPackage) as? Bool ?? false
+        let flipPrint = defaults.object(forKey: SettingsKeys.printFlip) as? Bool ?? false
         return PrintSettings(
             printerName: printerName.isEmpty ? "TAOBAO" : printerName,
             media: media,
@@ -178,7 +182,8 @@ struct PrintSettings {
             dedupe: dedupe,
             dedupeWindowMinutes: dedupeWindowMinutes,
             hideTaoLogo: hideTaoLogo,
-            hideCourierPackage: hideCourierPackage
+            hideCourierPackage: hideCourierPackage,
+            flipPrint: flipPrint
         )
     }
 }
@@ -203,6 +208,15 @@ final class AppModel: NSObject, ObservableObject {
     private var lastRawLogLineCount = 0
 
     var onRefresh: (() -> Void)?
+
+    /// 让本机服务的事件日志同时写到标准输出，方便在 Xcode 控制台 / 终端实时查看。
+    /// GUI 模式默认不接 sink（日志只进窗口内的查看器），调试时调用此方法即可镜像到 stdout。
+    func enableConsoleLogging() {
+        printService.setLogSink { line in
+            print(line)
+            fflush(stdout)
+        }
+    }
 
     func startPolling() {
         stopPolling()
@@ -231,9 +245,17 @@ final class AppModel: NSObject, ObservableObject {
         launchService(action: .restart)
     }
 
+    /// 当前生效的打印设置：以 debugPreview 为唯一来源翻译 dryRun，
+    /// 避免读到无人写入的历史 `printDryRun` 键（恒为 true）而把真实打印误降级为模拟。
+    private func resolvedPrintSettings() -> PrintSettings {
+        var settings = PrintSettings.current
+        settings.dryRun = UserDefaults.standard.bool(forKey: SettingsKeys.debugPreview)
+        return settings
+    }
+
     /// 立即应用当前打印设置，并在可能时重渲染最近一张真实面单预览。
     func applyPrintSettings() {
-        let didRerender = printService.applyPrintSettings(PrintSettings.current)
+        let didRerender = printService.applyPrintSettings(resolvedPrintSettings())
         apply(snapshot: printService.snapshot())
         if didRerender {
             lastActionOutput = "已按新设置更新预览"
@@ -256,13 +278,17 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     private func launchService(action: ServiceAction) {
-        let runtimeMode = RuntimeMode.current
+        // 调试预览开关是唯一的用户概念：关闭=真实物理打印，开启=仅生成 PDF 预览。
+        // 它在这里翻译为底层 runtimeMode + dryRun，CLI（--service-only）路径不受影响。
+        let debugPreview = UserDefaults.standard.bool(forKey: SettingsKeys.debugPreview)
+        let runtimeMode: RuntimeMode = debugPreview ? .defaultPreview : .respectPreviewFlag
         let autoOpenPreview = UserDefaults.standard.object(forKey: SettingsKeys.autoOpenPreview) as? Bool ?? true
-        let printSettings = PrintSettings.current
+        let printSettings = resolvedPrintSettings() // dryRun 由 debugPreview 翻译，忽略历史残留值
 
         serviceState = action == .stop ? .stopping : .starting
         let dedupeText = printSettings.dedupe ? "去重 \(printSettings.dedupeWindowMinutes) 分钟" : "去重关闭"
-        serviceSummary = "\(serviceState.title) • \(runtimeMode.title) • \(printSettings.dryRun ? "模拟打印" : "真实打印") • \(dedupeText)"
+        let modeText = debugPreview ? "调试预览" : "真实打印"
+        serviceSummary = "\(serviceState.title) • \(modeText) • \(dedupeText)"
 
         let configuration = PrintServiceConfiguration.current(
             runtimeMode: runtimeMode,

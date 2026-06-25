@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     override init() {
         super.init()
+        model.enableConsoleLogging()
         model.onRefresh = { [weak self] in
             self?.statusItemController?.refresh()
         }
@@ -56,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
 
         showSettingsWindow()
+        model.startService()
         model.startPolling()
         model.refresh()
     }

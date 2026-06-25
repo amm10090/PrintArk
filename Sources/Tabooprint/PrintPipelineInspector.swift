@@ -5,7 +5,6 @@ struct PrintPipelineInspector: View {
 
     @AppStorage(SettingsKeys.printerName) private var printerName = "TAOBAO"
     @AppStorage(SettingsKeys.printMedia) private var printMedia = "100x180mm"
-    @AppStorage(SettingsKeys.printDryRun) private var printDryRun = true
     @AppStorage(SettingsKeys.printFitToPage) private var fitToPage = true
     @AppStorage(SettingsKeys.printDedupe) private var duplicateProtection = true
     @AppStorage(SettingsKeys.dedupeWindowMinutes) private var duplicateWindowMinutes = 10
@@ -27,13 +26,6 @@ struct PrintPipelineInspector: View {
         printers.first(where: { $0.name == printerName }) ?? .fallback
     }
 
-    private var printModeBinding: Binding<PrintMode> {
-        Binding(
-            get: { PrintMode(dryRun: printDryRun) },
-            set: { printDryRun = $0.isDryRun }
-        )
-    }
-
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -41,7 +33,6 @@ struct PrintPipelineInspector: View {
                     selectedPrinter: selectedPrinter,
                     printerName: $printerName,
                     printMedia: $printMedia,
-                    printMode: printModeBinding,
                     fitToPage: $fitToPage,
                     duplicateProtection: $duplicateProtection,
                     duplicateWindowMinutes: $duplicateWindowMinutes,
@@ -71,7 +62,6 @@ struct PipelineSettingsCard: View {
 
     @Binding var printerName: String
     @Binding var printMedia: String
-    @Binding var printMode: PrintMode
     @Binding var fitToPage: Bool
     @Binding var duplicateProtection: Bool
     @Binding var duplicateWindowMinutes: Int
@@ -122,13 +112,6 @@ struct PipelineSettingsCard: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-
-                Picker("打印模式", selection: $printMode) {
-                    ForEach(PrintMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
 
                 Toggle("自动缩放以适应纸张", isOn: $fitToPage)
 

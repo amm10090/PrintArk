@@ -6,6 +6,7 @@ import NIOCore
 import NIOHTTP1
 import NIOPosix
 import NIOWebSocket
+import PDFKit
 
 struct PrintServiceConfiguration: Sendable {
     var host: String = "127.0.0.1"
@@ -642,8 +643,13 @@ final class NativePrintService: @unchecked Sendable {
     }
 
     private func submitPhysicalPrint(requestID: String, taskID: String, taskPrinter: String, docs: [ProtocolDocument], pdfURL: URL, config: PrintServiceConfiguration) -> PhysicalPrintJob {
-        let printerName = config.printSettings.printerName.isEmpty ? taskPrinter : config.printSettings.printerName
-        let lprArgs = buildLprArgs(printerName: printerName, pdfURL: pdfURL, settings: config.printSettings)
+        let resolved = config.printSettings.printerName.isEmpty ? taskPrinter : config.printSettings.printerName
+        // 兜底：清洗可能被旧版解析器写入 UserDefaults 的脏名（如「TAOBAO闲置」），避免 lpr -P 找不到目标。
+        let printerName = sanitizePrinterName(resolved)
+        // 反转打印：不同驱动对 lpr 的 Rotate/orientation 选项映射不一致（实测本机 Rotate=2 变成了 90°），
+        // 因此改在 PDF 层做确定性 180° 旋转，只旋转送打印机的副本，原始预览 PDF 不动。
+        let printURL = config.printSettings.flipPrint ? makeRotatedPDFForPrinting(source: pdfURL) : pdfURL
+        let lprArgs = buildLprArgs(printerName: printerName, pdfURL: printURL, settings: config.printSettings)
         let commandText = (["/usr/bin/lpr"] + lprArgs).map(shellDisplay(_:)).joined(separator: " ")
         let dedupeKey = buildPhysicalPrintDedupeKey(printerName: printerName, docs: docs, settings: config.printSettings)
 
@@ -746,6 +752,21 @@ final class NativePrintService: @unchecked Sendable {
             ])
             return PhysicalPrintJob(ok: false, dryRun: false, duplicate: false, printerName: printerName, commandText: commandText, pdfURL: pdfURL, error: error.localizedDescription)
         }
+    }
+
+    /// 为物理打印生成一个 180° 旋转的 PDF 副本（PDF 标准 /Rotate，CUPS 栅格化必然遵守），
+    /// 不修改原始预览 PDF。失败时回退到原 PDF，保证打印不中断。
+    private func makeRotatedPDFForPrinting(source: URL) -> URL {
+        guard let document = PDFDocument(url: source) else { return source }
+        for index in 0..<document.pageCount {
+            guard let page = document.page(at: index) else { continue }
+            // PDFPage.rotation 以度为单位，按 90 的倍数累加，得到 180° 反转。
+            page.rotation = (page.rotation + 180) % 360
+        }
+        let rotatedURL = source.deletingPathExtension()
+            .appendingPathExtension("flipped.pdf")
+        guard document.write(to: rotatedURL) else { return source }
+        return rotatedURL
     }
 
     private func emit(_ type: String, _ fields: [String: JSONValue]) {
@@ -1471,6 +1492,7 @@ func buildPhysicalPrintDedupeKey(printerName: String, docs: [ProtocolDocument], 
         printerName,
         settings.media.isEmpty ? "(default-media)" : settings.media,
         settings.fitToPage ? "fit" : "nofit",
+        settings.flipPrint ? "flip" : "noflip",
         ids,
         fingerprints,
     ].joined(separator: "|")
@@ -1528,6 +1550,23 @@ private func safeFilename(_ value: String) -> String {
     return text.isEmpty ? "tabooprint_\(millisecondsNow())" : text
 }
 
+/// 中文 lpstat 把打印机名与状态词连写（如「TAOBAO闲置」）。此函数剥掉分隔符及状态后缀，
+/// 还原真实打印机名。既用于解析 lpstat 输出，也作为物理打印前的兜底清洗。
+private func sanitizePrinterName(_ raw: String) -> String {
+    var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let cut = name.firstIndex(where: { $0.isWhitespace || $0 == "，" || $0 == "," }) {
+        name = String(name[..<cut])
+    }
+    for suffix in ["闲置", "现在正在打印", "正在打印", "已禁用", "已停用", "已停止"] {
+        if let range = name.range(of: suffix) {
+            name = String(name[..<range.lowerBound])
+            break
+        }
+    }
+    let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    return cleaned.isEmpty ? raw : cleaned
+}
+
 private func discoverPrinterDevices(defaultPrinterName configuredDefault: String) -> [PrinterDevice] {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/lpstat")
@@ -1555,8 +1594,10 @@ private func discoverPrinterDevices(defaultPrinterName configuredDefault: String
         if line.hasPrefix("printer ") {
             name = line.split(separator: " ").dropFirst().first.map(String.init)
         } else if line.hasPrefix("打印机") {
-            let stripped = line.replacingOccurrences(of: "打印机", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-            name = stripped.split(whereSeparator: { $0.isWhitespace || $0 == "，" }).first.map(String.init)
+            // 中文 lpstat 形如「打印机TAOBAO闲置，启用时间始于…」——名字后直接跟状态词，
+            // 既无空格也无逗号分隔，交由 sanitizePrinterName 按状态关键词或标点截断。
+            let stripped = sanitizePrinterName(line.replacingOccurrences(of: "打印机", with: ""))
+            name = stripped.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : stripped
         } else {
             name = nil
         }
