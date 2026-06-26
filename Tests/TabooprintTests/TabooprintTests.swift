@@ -128,6 +128,35 @@ final class TabooprintTests: XCTestCase {
         XCTAssertEqual(mediaBox.height, 297 * 72 / 25.4, accuracy: 0.01)
     }
 
+    func testAdaptivePaperSizesMediaBoxToContentFootprint() throws {
+        let renderer = NativeWaybillRenderer()
+        let outputDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+        let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
+
+        func mediaBox(_ cal: PrinterCalibration, _ taskID: String) throws -> CGRect {
+            // 手选 A4，但自适应应忽略它，按内容足迹定页。
+            let result = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: taskID, paperSize: PaperCatalog.match(media: "A4"), calibration: cal)
+            let document = try XCTUnwrap(CGPDFDocument(result.url as CFURL))
+            return try XCTUnwrap(document.page(at: 1)).getBoxRect(.mediaBox)
+        }
+
+        // 自适应 + 0°：足迹 = 内容盒 74×126mm。
+        let rot0 = try mediaBox(PrinterCalibration(adaptivePaper: true), "ADAPT0")
+        XCTAssertEqual(rot0.width, 74 * 72 / 25.4, accuracy: 0.01)
+        XCTAssertEqual(rot0.height, 126 * 72 / 25.4, accuracy: 0.01)
+
+        // 自适应 + 90°：交换长短边 → 126×74mm。
+        let rot90 = try mediaBox(PrinterCalibration(rotationDegrees: 90, adaptivePaper: true), "ADAPT90")
+        XCTAssertEqual(rot90.width, 126 * 72 / 25.4, accuracy: 0.01)
+        XCTAssertEqual(rot90.height, 74 * 72 / 25.4, accuracy: 0.01)
+
+        // 自适应 + 2× 缩放：足迹按比例放大 → 148×252mm。
+        let scaled = try mediaBox(PrinterCalibration(scaleRatio: 2.0, adaptivePaper: true), "ADAPT2X")
+        XCTAssertEqual(scaled.width, 148 * 72 / 25.4, accuracy: 0.01)
+        XCTAssertEqual(scaled.height, 252 * 72 / 25.4, accuracy: 0.01)
+    }
+
     func testPaperCatalogMatchesAndFallsBack() {
         XCTAssertEqual(PaperCatalog.default.media, "100x180mm")
         XCTAssertEqual(PaperCatalog.match(media: "100x180mm").id, "100x180mm")
@@ -317,7 +346,30 @@ final class TabooprintTests: XCTestCase {
             "-o", "fit-to-page",
             "/tmp/tabooprint/waybills/TASK.pdf",
         ])
-        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|noflip|DOC1,DOC2|FP1,FP2")
+        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|noflip|offX:0.000|offY:0.000|rot:0|scale:1.000|fixed|DOC1,DOC2|FP1,FP2")
+    }
+
+    func testCalibrationChangesDedupeKeyAndAdaptiveMedia() throws {
+        let base = PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10)
+        let docs = [ProtocolDocument(documentId: "DOC1", fingerprint: "FP1", index: 0)]
+        let baseKey = buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: base)
+
+        // 每个校准字段变化都必须改变 dedupe key，否则改校准会被当重复打印抑制。
+        var offset = base; offset.offsetXMM = 2
+        XCTAssertNotEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: offset), baseKey)
+        var rotated = base; rotated.rotationDegrees = 90
+        XCTAssertNotEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: rotated), baseKey)
+        var scaled = base; scaled.scaleRatio = 1.5
+        XCTAssertNotEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: scaled), baseKey)
+        var adaptive = base; adaptive.adaptivePaper = true
+        XCTAssertNotEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: adaptive), baseKey)
+
+        // 自适应纸张：媒体名取内容足迹；90° 旋转交换长短边 → 126x74mm。
+        XCTAssertEqual(resolvedMediaString(settings: adaptive), "74x126mm")
+        var adaptiveRot = base; adaptiveRot.adaptivePaper = true; adaptiveRot.rotationDegrees = 90
+        XCTAssertEqual(resolvedMediaString(settings: adaptiveRot), "126x74mm")
+        // 非自适应时媒体名维持手选预设。
+        XCTAssertEqual(resolvedMediaString(settings: base), "100x180mm")
     }
 
     func testFlipPrintAddsOrientationArgAndDedupeKey() throws {
@@ -333,7 +385,7 @@ final class TabooprintTests: XCTestCase {
             "-o", "fit-to-page",
             "/tmp/tabooprint/waybills/TASK.pdf",
         ])
-        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|flip|DOC1|FP1")
+        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|flip|offX:0.000|offY:0.000|rot:0|scale:1.000|fixed|DOC1|FP1")
     }
 
     func testDocumentFingerprintIncludesEncryptedAndCustomFields() throws {

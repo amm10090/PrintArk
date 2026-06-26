@@ -173,7 +173,7 @@ struct PrintWorkspaceContent: View {
     var body: some View {
         switch selection {
         case .currentWaybill:
-            LabelPreviewWorkspace(pdfURL: model.latestPreviewPDF)
+            LabelPreviewWorkspace(pdfURL: model.latestPreviewPDF, model: model)
         case .printQueue:
             SidebarPage(
                 title: "打印队列",
@@ -320,7 +320,6 @@ struct PayloadDocumentsCard: View {
 struct VersionSummaryCard: View {
     @ObservedObject var model: AppModel
     @AppStorage(SettingsKeys.debugPreview) private var debugPreview = false
-    @AppStorage(SettingsKeys.printFlip) private var flipPrint = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -341,16 +340,6 @@ struct VersionSummaryCard: View {
                     Text(debugPreview
                          ? "已开启：千牛打印请求只生成 PDF 预览，不会真实送到打印机。适合没有物理打印机的开发环境。"
                          : "已关闭：千牛打印请求会真实送到打印机（默认行为）。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    Divider()
-
-                    Toggle("反转打印（纸张180°反向放置时使用）", isOn: $flipPrint)
-                        .onChange(of: flipPrint) { _ in model.applyPrintSettings() }
-
-                    Text("仅作用于真实打印，预览不反转。用于快递面单纸反方向放置时，避免信息从纸张底部开始打印。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)

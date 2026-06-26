@@ -14,6 +14,7 @@ enum SettingsKeys {
     static let printHideTaoLogo = "tabooprint.printHideTaoLogo"
     static let printHideCourierPackage = "tabooprint.printHideCourierPackage"
     static let printFlip = "tabooprint.printFlip"
+    static let printerCalibrations = "tabooprint.printerCalibrations"
 }
 
 enum RuntimeMode: String, CaseIterable, Identifiable {
@@ -162,6 +163,17 @@ struct PrintSettings {
     var hideTaoLogo: Bool = false
     var hideCourierPackage: Bool = false
     var flipPrint: Bool = false
+    // 按打印机校准（由 resolvedPrintSettings() 从 AppModel.printerCalibrations 注入，不读扁平键）。
+    var offsetXMM: Double = 0
+    var offsetYMM: Double = 0
+    var rotationDegrees: Int = 0
+    var scaleRatio: Double = 1.0
+    var adaptivePaper: Bool = false
+
+    /// 渲染用的校准视图，从已注入的字段聚合。
+    var calibration: PrinterCalibration {
+        PrinterCalibration(offsetXMM: offsetXMM, offsetYMM: offsetYMM, rotationDegrees: rotationDegrees, scaleRatio: scaleRatio, adaptivePaper: adaptivePaper)
+    }
 
     static var current: PrintSettings {
         let defaults = UserDefaults.standard
@@ -201,6 +213,10 @@ final class AppModel: NSObject, ObservableObject {
     @Published var latestPreviewPDF: URL?
     @Published var lastActionOutput: String = ""
     @Published var lastRefreshedText: String = "从未刷新"
+
+    /// 按打印机名持久化的校准设置。整张表以 JSON 存于单个 UserDefaults 键，
+    /// 因为 @AppStorage 无法按打印机名动态建键。
+    @Published var printerCalibrations: [String: PrinterCalibration] = AppModel.loadCalibrations()
 
     private let printService = NativePrintService()
     private var pollingTimer: Timer?
@@ -250,7 +266,29 @@ final class AppModel: NSObject, ObservableObject {
     private func resolvedPrintSettings() -> PrintSettings {
         var settings = PrintSettings.current
         settings.dryRun = UserDefaults.standard.bool(forKey: SettingsKeys.debugPreview)
+        // 注入当前选中打印机的校准；服务端消费这些具体值（不再按名二次查表）。
+        let cal = printerCalibrations[settings.printerName] ?? .identity
+        settings.offsetXMM = cal.offsetXMM
+        settings.offsetYMM = cal.offsetYMM
+        settings.rotationDegrees = cal.rotationDegrees
+        settings.scaleRatio = cal.scaleRatio
+        settings.adaptivePaper = cal.adaptivePaper
         return settings
+    }
+
+    /// 从 UserDefaults 解码校准表；缺失或损坏时回退到空表。
+    private static func loadCalibrations() -> [String: PrinterCalibration] {
+        guard let data = UserDefaults.standard.data(forKey: SettingsKeys.printerCalibrations),
+              let decoded = try? JSONDecoder().decode([String: PrinterCalibration].self, from: data) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    /// 将当前校准表编码写回 UserDefaults。
+    func saveCalibrations() {
+        guard let data = try? JSONEncoder().encode(printerCalibrations) else { return }
+        UserDefaults.standard.set(data, forKey: SettingsKeys.printerCalibrations)
     }
 
     /// 立即应用当前打印设置，并在可能时重渲染最近一张真实面单预览。

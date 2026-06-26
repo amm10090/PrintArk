@@ -4,14 +4,24 @@ import SwiftUI
 
 struct LabelPreviewWorkspace: View {
     let pdfURL: URL?
+    @ObservedObject var model: AppModel
 
     @AppStorage(SettingsKeys.printMedia) private var printMedia = "100x180mm"
     @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = false
     @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = false
+    @AppStorage(SettingsKeys.printerName) private var printerName = "TAOBAO"
     @State private var samplePDFURL: URL?
 
+    private var calibration: PrinterCalibration {
+        model.printerCalibrations[printerName] ?? .identity
+    }
+
+    /// 预览外框尺寸：自适应纸张时按内容足迹，否则用手选纸张。
     private var paperSize: PaperSize {
-        PaperCatalog.match(media: printMedia)
+        let cal = calibration
+        guard cal.adaptivePaper else { return PaperCatalog.match(media: printMedia) }
+        let f = adaptiveFootprintMM(rotationDegrees: cal.rotationDegrees, scaleRatio: cal.scaleRatio)
+        return PaperSize(id: "adaptive", displayName: "自适应", media: "", widthMM: CGFloat(f.w), heightMM: CGFloat(f.h), group: .waybill)
     }
 
     private var displayURL: URL {
@@ -45,7 +55,7 @@ struct LabelPreviewWorkspace: View {
 
     @MainActor
     private func generateSamplePDF() -> URL {
-        (try? WaybillPreviewSamplePDF.writeSample(hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage)) ?? Self.placeholderSampleURL
+        (try? WaybillPreviewSamplePDF.writeSample(hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, paperSize: paperSize, calibration: calibration)) ?? Self.placeholderSampleURL
     }
 
     var body: some View {
@@ -72,14 +82,17 @@ struct LabelPreviewWorkspace: View {
             guard pdfURL == nil, samplePDFURL == nil else { return }
             samplePDFURL = generateSamplePDF()
         }
-        .onChange(of: hideTaoLogo) { _ in
-            guard pdfURL == nil else { return }
-            samplePDFURL = generateSamplePDF()
-        }
-        .onChange(of: hideCourierPackage) { _ in
-            guard pdfURL == nil else { return }
-            samplePDFURL = generateSamplePDF()
-        }
+        .onChange(of: hideTaoLogo) { _ in regenerateSampleIfNeeded() }
+        .onChange(of: hideCourierPackage) { _ in regenerateSampleIfNeeded() }
+        .onChange(of: printMedia) { _ in regenerateSampleIfNeeded() }
+        .onChange(of: printerName) { _ in regenerateSampleIfNeeded() }
+        .onChange(of: calibration) { _ in regenerateSampleIfNeeded() }
+    }
+
+    /// 仅当展示样本面单（无真实任务 PDF）时，按当前设置重绘样本。
+    private func regenerateSampleIfNeeded() {
+        guard pdfURL == nil else { return }
+        samplePDFURL = generateSamplePDF()
     }
 }
 
@@ -102,17 +115,20 @@ enum WaybillPreviewSamplePDF {
         .appendingPathComponent("tabooprint", isDirectory: true)
         .appendingPathComponent("preview-samples", isDirectory: true)
 
-    static func writeSample(to outputDirectory: URL = sampleDirectory, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false) throws -> URL {
+    static func writeSample(to outputDirectory: URL = sampleDirectory, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false, paperSize: PaperSize = PaperCatalog.default, calibration: PrinterCalibration = .identity) throws -> URL {
         let renderer = NativeWaybillRenderer()
-        // 文件名随开关状态变化，确保 URL 改变后 PDFView 一定重新加载。
-        let variantTaskID = "\(taskID)-\(hideTaoLogo ? "1" : "0")\(hideCourierPackage ? "1" : "0")"
+        // 文件名随所有影响渲染的输入变化，确保 URL 改变后 PDFView 一定重新加载。
+        let calToken = "\(Int((calibration.offsetXMM * 10).rounded()))_\(Int((calibration.offsetYMM * 10).rounded()))_\(calibration.rotationDegrees)_\(Int((calibration.scaleRatio * 100).rounded()))_\(calibration.adaptivePaper ? "a" : "f")"
+        let variantTaskID = "\(taskID)-\(hideTaoLogo ? "1" : "0")\(hideCourierPackage ? "1" : "0")-\(paperSize.id)-\(calToken)"
         let result = try renderer.render(
             payload: try samplePayload(for: .sample),
             outputDirectory: outputDirectory,
             requestID: requestID,
             taskID: variantTaskID,
+            paperSize: paperSize,
             hideTaoLogo: hideTaoLogo,
-            hideCourierPackage: hideCourierPackage
+            hideCourierPackage: hideCourierPackage,
+            calibration: calibration
         )
         return result.url
     }
@@ -655,7 +671,7 @@ struct TechnicalSpecItem: View {
 struct LabelPreviewWorkspace_Previews: PreviewProvider {
     static var previews: some View {
         Group {
-            LabelPreviewWorkspace(pdfURL: nil)
+            LabelPreviewWorkspace(pdfURL: nil, model: PreviewSamples.consoleModel)
                 .frame(width: 760, height: 720)
                 .previewDisplayName("预览工作台")
 

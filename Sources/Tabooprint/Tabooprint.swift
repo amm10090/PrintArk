@@ -70,10 +70,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let window = notification.object as? NSWindow,
            window == settingsWindowController?.window {
             settingsWindowController = nil
+            // 设置窗口关闭后退回菜单栏常驻，不在 Dock 显示。
+            NSApp.setActivationPolicy(.accessory)
         }
     }
 
     private func showSettingsWindow() {
+        // 有窗口时作为常规 app 在 Dock 显示图标。
+        NSApp.setActivationPolicy(.regular)
+
         if let controller = settingsWindowController {
             controller.showWindow(nil)
             controller.window?.makeKeyAndOrderFront(nil)
@@ -83,7 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let hostingController = NSHostingController(rootView: WaybillPrintConsoleView(model: model))
         let window = NSWindow(contentViewController: hostingController)
-        window.title = "Tabooprint"
+        window.title = "印舟"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 1240, height: 780))
         window.center()
@@ -169,9 +174,9 @@ final class StatusItemController: NSObject {
     }
 
     private func configureStatusItem() {
-        statusItem.button?.image = NSImage(systemSymbolName: "printer.fill", accessibilityDescription: "Tabooprint")
+        statusItem.button?.image = NSImage(systemSymbolName: "printer.fill", accessibilityDescription: "印舟")
         statusItem.button?.imagePosition = .imageOnly
-        statusItem.button?.toolTip = "Tabooprint"
+        statusItem.button?.toolTip = "印舟"
     }
 
     private func configureMenu() {

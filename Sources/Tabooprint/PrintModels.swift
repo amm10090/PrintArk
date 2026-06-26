@@ -16,6 +16,32 @@ enum WaybillContentBox {
     static let heightMM: CGFloat = 126
 }
 
+/// 单台打印机的校准设置：mm 偏移、旋转角度、缩放、自适应纸张。
+/// 按打印机名分别持久化（见 AppModel.printerCalibrations），切换打印机时自动加载。
+struct PrinterCalibration: Codable, Equatable {
+    /// 水平偏移（mm，+ 向右）。
+    var offsetXMM: Double = 0
+    /// 垂直偏移（mm，+ 向下，页面方向）。
+    var offsetYMM: Double = 0
+    /// 旋转角度，预设 0/90/180/270/360。
+    var rotationDegrees: Int = 0
+    /// 缩放比例，默认 1.0。
+    var scaleRatio: Double = 1.0
+    /// 自适应纸张：开启后按内容足迹自动选纸，而非手选纸张尺寸。
+    var adaptivePaper: Bool = false
+
+    static let identity = PrinterCalibration()
+}
+
+/// 自适应纸张时的内容足迹尺寸（mm）：74×126 内容盒经旋转交换长短边、再乘缩放。
+/// 渲染 mediaBox、lpr media 字符串、dedupe key 三处共用，确保一致。
+func adaptiveFootprintMM(rotationDegrees: Int, scaleRatio: Double) -> (w: Double, h: Double) {
+    let swap = (rotationDegrees % 180 == 90)
+    let w = (swap ? WaybillContentBox.heightMM : WaybillContentBox.widthMM) * CGFloat(scaleRatio)
+    let h = (swap ? WaybillContentBox.widthMM : WaybillContentBox.heightMM) * CGFloat(scaleRatio)
+    return (Double(w), Double(h))
+}
+
 /// 纸张/面单尺寸的单一数据源。UI 选择、预览外框、PDF mediaBox 均从这里取值。
 struct PaperSize: Identifiable, Hashable {
     enum Group: String, CaseIterable, Identifiable {

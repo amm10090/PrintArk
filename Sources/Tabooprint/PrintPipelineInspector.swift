@@ -38,6 +38,9 @@ struct PrintPipelineInspector: View {
                     duplicateWindowMinutes: $duplicateWindowMinutes,
                     printers: printers
                 )
+                .onChange(of: printerName) { _ in model.applyPrintSettings() }
+
+                PrinterCalibrationCard(model: model, printerName: printerName)
 
                 LabelContentCard(
                     model: model,
@@ -46,8 +49,6 @@ struct PrintPipelineInspector: View {
                 )
 
                 RecentJobsCard(jobs: model.printJobs)
-
-                FutureBatchCard()
             }
             .frame(maxWidth: .infinity)
             .padding(18)
@@ -141,6 +142,111 @@ struct LabelContentCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// 按打印机的校准设置卡片。通过指向 model.printerCalibrations、按当前 printerName
+/// 取值的计算 Binding 读写——切换打印机 Picker 时控件自动显示该机器的值。
+struct PrinterCalibrationCard: View {
+    @ObservedObject var model: AppModel
+    let printerName: String
+
+    @AppStorage(SettingsKeys.printFlip) private var flipPrint = false
+
+    private static let rotationOptions = [0, 90, 180, 270, 360]
+
+    private var calibration: Binding<PrinterCalibration> {
+        Binding(
+            get: { model.printerCalibrations[printerName] ?? .identity },
+            set: {
+                model.printerCalibrations[printerName] = $0
+                model.saveCalibrations()
+                model.applyPrintSettings()
+            }
+        )
+    }
+
+    private var rotationWarning: Bool {
+        let rot = calibration.wrappedValue.rotationDegrees % 360
+        return (rot == 90 || rot == 270) && !calibration.wrappedValue.adaptivePaper
+    }
+
+    var body: some View {
+        SettingsCard(title: "打印机校准", subtitle: "为「\(printerName)」单独保存偏移、旋转、缩放与自适应纸张。") {
+            VStack(alignment: .leading, spacing: 14) {
+                Stepper(
+                    "水平偏移：\(mmText(calibration.wrappedValue.offsetXMM)) mm（+ 向右）",
+                    value: calibration.offsetXMM,
+                    in: -50...50,
+                    step: 0.5
+                )
+
+                Stepper(
+                    "垂直偏移：\(mmText(calibration.wrappedValue.offsetYMM)) mm（+ 向下）",
+                    value: calibration.offsetYMM,
+                    in: -50...50,
+                    step: 0.5
+                )
+
+                Picker("旋转角度", selection: calibration.rotationDegrees) {
+                    ForEach(Self.rotationOptions, id: \.self) { degree in
+                        Text("\(degree)°").tag(degree)
+                    }
+                }
+
+                Stepper(
+                    "缩放比例：\(scaleText(calibration.wrappedValue.scaleRatio))×",
+                    value: calibration.scaleRatio,
+                    in: 0.25...4.0,
+                    step: 0.05
+                )
+
+                Toggle("自适应纸张（按内容尺寸自动选纸）", isOn: calibration.adaptivePaper)
+
+                Divider()
+
+                Toggle("反转打印（纸张180°反向放置时使用）", isOn: $flipPrint)
+                    .onChange(of: flipPrint) { _ in model.applyPrintSettings() }
+
+                Text("仅作用于真实打印，预览不反转。用于快递面单纸反方向放置时，避免信息从纸张底部开始打印。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if rotationWarning {
+                    CalibrationHint(text: "90° / 270° 旋转在非自适应纸张下可能裁切内容，建议开启自适应纸张。", color: .orange)
+                }
+
+                if calibration.wrappedValue.rotationDegrees % 360 == 180 && flipPrint {
+                    CalibrationHint(text: "校准旋转 180° 与「反转打印」会在纸面相互抵消（预览仍显示 180°）。", color: .secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func mmText(_ value: Double) -> String {
+        String(format: "%.1f", value)
+    }
+
+    private func scaleText(_ value: Double) -> String {
+        String(format: "%.2f", value)
+    }
+}
+
+struct CalibrationHint: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(color)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -240,44 +346,6 @@ struct RecentJobRow: View {
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-}
-
-struct FutureBatchCard: View {
-    var body: some View {
-        SettingsCard(title: "后续批量能力", subtitle: "当前可处理一次提交里的多张面单；批量导入将在后续版本提供。") {
-            VStack(alignment: .leading, spacing: 10) {
-                FutureRow(title: "CSV / Excel 导入", detail: "后续解析为多张面单")
-                FutureRow(title: "字段映射", detail: "后续映射运单号、地址、备注等字段")
-                FutureRow(title: "批量预览", detail: "一次提交里的多张面单当前可进入预览")
-                FutureRow(title: "批量打印", detail: "后续支持一次性打印多个面单")
-                FutureRow(title: "失败重试", detail: "后续对失败任务单独重试")
-            }
-        }
-    }
-}
-
-struct FutureRow: View {
-    let title: String
-    let detail: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "circle.dashed")
-                .foregroundStyle(.secondary)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-        }
     }
 }
 

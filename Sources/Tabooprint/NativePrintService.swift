@@ -228,7 +228,8 @@ final class NativePrintService: @unchecked Sendable {
             docs: docs,
             paperSize: PaperCatalog.match(media: settings.media),
             hideTaoLogo: settings.hideTaoLogo,
-            hideCourierPackage: settings.hideCourierPackage
+            hideCourierPackage: settings.hideCourierPackage,
+            calibration: settings.calibration
         )
         return true
     }
@@ -442,7 +443,7 @@ final class NativePrintService: @unchecked Sendable {
             "pending": .number(45),
             "rendering": .number(160),
         ]
-        let renderResult = renderWaybill(payload: payload, requestID: requestID, taskID: taskID, docs: docs, paperSize: PaperCatalog.match(media: config.printSettings.media), hideTaoLogo: config.printSettings.hideTaoLogo, hideCourierPackage: config.printSettings.hideCourierPackage)
+        let renderResult = renderWaybill(payload: payload, requestID: requestID, taskID: taskID, docs: docs, paperSize: PaperCatalog.match(media: config.printSettings.media), hideTaoLogo: config.printSettings.hideTaoLogo, hideCourierPackage: config.printSettings.hideCourierPackage, calibration: config.printSettings.calibration)
         let previewURL = "http://localhost:\(config.httpPort)/file/\(renderResult.fileName)"
         var physicalPrintJob: PhysicalPrintJob?
 
@@ -610,9 +611,9 @@ final class NativePrintService: @unchecked Sendable {
         channel.writeAndFlush(frame, promise: nil)
     }
 
-    private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument], paperSize: PaperSize, hideTaoLogo: Bool, hideCourierPackage: Bool) -> RenderResult {
+    private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument], paperSize: PaperSize, hideTaoLogo: Bool, hideCourierPackage: Bool, calibration: PrinterCalibration) -> RenderResult {
         do {
-            let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage)
+            let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, calibration: calibration)
             lock.withLock {
                 renderedPDFs[result.fileName] = result.url
                 lastRenderContext = (payload: payload, requestID: requestID, taskID: taskID)
@@ -941,7 +942,7 @@ final class NativeWaybillRenderer: @unchecked Sendable {
     private let contentHeightMM: CGFloat = WaybillContentBox.heightMM
     private let mmToPoint: CGFloat = 72 / 25.4
 
-    func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String, paperSize: PaperSize = PaperCatalog.default, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false) throws -> RenderResult {
+    func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String, paperSize: PaperSize = PaperCatalog.default, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false, calibration: PrinterCalibration = .identity) throws -> RenderResult {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         let fileName = "\(safeFilename(taskID)).pdf"
         let outputURL = outputDirectory.appendingPathComponent(fileName)
@@ -951,24 +952,31 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             doc.string("documentID", default: doc.string("documentId", default: "MOCK_DOC_\(index + 1)"))
         }
 
-        // 外框 = 所选纸张尺寸（PDF mediaBox）。
-        var pageRect = CGRect(x: 0, y: 0, width: paperSize.widthMM * mmToPoint, height: paperSize.heightMM * mmToPoint)
-        // 内容盒固定 74×126mm，水平居中、垂直顶部对齐放入外框。
-        let contentRect = contentRect(in: pageRect, paperSize: paperSize)
+        // 外框 = 所选纸张尺寸（PDF mediaBox）；自适应时改用内容足迹。
+        var pageRect: CGRect
+        let contentRect: CGRect
+        if calibration.adaptivePaper {
+            let f = adaptiveFootprintMM(rotationDegrees: calibration.rotationDegrees, scaleRatio: calibration.scaleRatio)
+            pageRect = CGRect(x: 0, y: 0, width: f.w * mmToPoint, height: f.h * mmToPoint)
+            contentRect = centeredContentRect(in: pageRect)
+        } else {
+            pageRect = CGRect(x: 0, y: 0, width: paperSize.widthMM * mmToPoint, height: paperSize.heightMM * mmToPoint)
+            contentRect = self.contentRect(in: pageRect, paperSize: paperSize)
+        }
         guard let consumer = CGDataConsumer(url: outputURL as CFURL),
               let context = CGContext(consumer: consumer, mediaBox: &pageRect, nil) else {
             throw NSError(domain: "Tabooprint", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot create PDF"])
         }
 
         if documents.isEmpty {
-            drawPage(context: context, pageRect: pageRect, contentRect: contentRect) {
+            drawPage(context: context, pageRect: pageRect, contentRect: contentRect, calibration: calibration) {
                 drawText("Tabooprint 空任务", at: CGPoint(x: 18, y: 32), size: 16, weight: .bold)
                 drawText("requestID: \(requestID)", at: CGPoint(x: 18, y: 62), size: 8, weight: .regular)
                 drawText("taskID: \(taskID)", at: CGPoint(x: 18, y: 76), size: 8, weight: .regular)
             }
         } else {
             for (index, document) in documents.enumerated() {
-                drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage)
+                drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, calibration: calibration)
             }
         }
         context.closePDF()
@@ -983,6 +991,19 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         // 顶部对齐：PDF 坐标系原点在左下，内容盒顶边贴纸张顶边。
         let originY = max(0, pageRect.height - contentHeight)
         return CGRect(x: originX, y: originY, width: contentWidth, height: contentHeight)
+    }
+
+    /// 自适应纸张时把内容盒两轴居中放入足迹页。90/270 旋转后内容长边超过页高，
+    /// originY 为负属正常——旋转绕中心进行，最终居中填满足迹。
+    private func centeredContentRect(in pageRect: CGRect) -> CGRect {
+        let contentWidth = contentWidthMM * mmToPoint
+        let contentHeight = contentHeightMM * mmToPoint
+        return CGRect(
+            x: (pageRect.width - contentWidth) / 2,
+            y: (pageRect.height - contentHeight) / 2,
+            width: contentWidth,
+            height: contentHeight
+        )
     }
 
     func writeFallbackPDF(outputDirectory: URL, requestID: String, taskID: String) -> RenderResult {
@@ -1013,8 +1034,8 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         return Data(text.utf8)
     }
 
-    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int, hideTaoLogo: Bool, hideCourierPackage: Bool) {
-        drawPage(context: context, pageRect: pageRect, contentRect: contentRect) {
+    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int, hideTaoLogo: Bool, hideCourierPackage: Bool, calibration: PrinterCalibration) {
+        drawPage(context: context, pageRect: pageRect, contentRect: contentRect, calibration: calibration) {
             let parts = splitContents(document)
             let decrypted = decryptWaybillContent(parts.standard)
             let customData = parts.custom.object("data")
@@ -1033,11 +1054,23 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         }
     }
 
-    private func drawPage(context: CGContext, pageRect: CGRect, contentRect: CGRect, draw: () -> Void) {
+    private func drawPage(context: CGContext, pageRect: CGRect, contentRect: CGRect, calibration: PrinterCalibration = .identity, draw: () -> Void) {
         context.beginPDFPage(nil)
         context.saveGState()
         context.setFillColor(NSColor.white.cgColor)
         context.fill(pageRect)
+        // 校准变换：缩放 → 旋转 → 偏移，绕内容盒中心轴心，应用在现有定位之前。
+        // 旋转方向：rotate(by:) 弧度、逆时针为正；与产品期望不符则对 theta 取负。
+        let cx = contentRect.midX
+        let cy = contentRect.midY
+        let offX = CGFloat(calibration.offsetXMM) * mmToPoint
+        let offY = CGFloat(calibration.offsetYMM) * mmToPoint
+        let theta = CGFloat(calibration.rotationDegrees % 360) * .pi / 180
+        context.translateBy(x: offX, y: -offY)   // device y 朝上，故 +向下 用 -offY
+        context.translateBy(x: cx, y: cy)
+        context.rotate(by: theta)
+        context.scaleBy(x: CGFloat(calibration.scaleRatio), y: CGFloat(calibration.scaleRatio))
+        context.translateBy(x: -cx, y: -cy)
         // 平移到内容盒左上角，使内 mm() 绝对坐标落在居中/顶部对齐后的内容盒内。
         context.translateBy(x: contentRect.minX, y: contentRect.minY + contentRect.height)
         context.scaleBy(x: 1, y: -1)
@@ -1474,8 +1507,9 @@ private func describeTaskResult(shouldReturnPreview: Bool, physicalPrintJob: Phy
 
 func buildLprArgs(printerName: String, pdfURL: URL, settings: PrintSettings) -> [String] {
     var args = ["-P", printerName]
-    if !settings.media.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        args += ["-o", "media=\(settings.media)"]
+    let media = resolvedMediaString(settings: settings)
+    if !media.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        args += ["-o", "media=\(media)"]
     }
     if settings.fitToPage {
         args += ["-o", "fit-to-page"]
@@ -1484,15 +1518,29 @@ func buildLprArgs(printerName: String, pdfURL: URL, settings: PrintSettings) -> 
     return args
 }
 
+/// 自适应纸张时用内容足迹算出的自定义 media（`<w>x<h>mm`，同 catalog 形式）；否则用手选预设。
+/// 渲染 mediaBox 与 lpr media 共用此结果，确保一致。
+func resolvedMediaString(settings: PrintSettings) -> String {
+    guard settings.adaptivePaper else { return settings.media }
+    let f = adaptiveFootprintMM(rotationDegrees: settings.rotationDegrees, scaleRatio: settings.scaleRatio)
+    return "\(Int(f.w.rounded()))x\(Int(f.h.rounded()))mm"
+}
+
 func buildPhysicalPrintDedupeKey(printerName: String, docs: [ProtocolDocument], settings: PrintSettings) -> String {
     let ids = docs.map(\.documentId).joined(separator: ",")
     let fingerprints = docs.map(\.fingerprint).joined(separator: ",")
+    let fmt = { (value: Double) in String(format: "%.3f", value) }
     return [
         "physical",
         printerName,
-        settings.media.isEmpty ? "(default-media)" : settings.media,
+        resolvedMediaString(settings: settings).isEmpty ? "(default-media)" : resolvedMediaString(settings: settings),
         settings.fitToPage ? "fit" : "nofit",
         settings.flipPrint ? "flip" : "noflip",
+        "offX:\(fmt(settings.offsetXMM))",
+        "offY:\(fmt(settings.offsetYMM))",
+        "rot:\(settings.rotationDegrees % 360)",
+        "scale:\(fmt(settings.scaleRatio))",
+        settings.adaptivePaper ? "adaptive" : "fixed",
         ids,
         fingerprints,
     ].joined(separator: "|")
