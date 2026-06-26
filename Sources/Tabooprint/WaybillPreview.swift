@@ -9,6 +9,7 @@ struct LabelPreviewWorkspace: View {
     @AppStorage(SettingsKeys.printMedia) private var printMedia = "100x180mm"
     @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = false
     @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = false
+    @AppStorage(SettingsKeys.printHideBorder) private var hideBorder = false
     @AppStorage(SettingsKeys.printerName) private var printerName = "TAOBAO"
     @State private var samplePDFURL: URL?
 
@@ -55,7 +56,7 @@ struct LabelPreviewWorkspace: View {
 
     @MainActor
     private func generateSamplePDF() -> URL {
-        (try? WaybillPreviewSamplePDF.writeSample(hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, paperSize: paperSize, calibration: calibration)) ?? Self.placeholderSampleURL
+        (try? WaybillPreviewSamplePDF.writeSample(hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, paperSize: paperSize, calibration: calibration)) ?? Self.placeholderSampleURL
     }
 
     var body: some View {
@@ -84,6 +85,7 @@ struct LabelPreviewWorkspace: View {
         }
         .onChange(of: hideTaoLogo) { _ in regenerateSampleIfNeeded() }
         .onChange(of: hideCourierPackage) { _ in regenerateSampleIfNeeded() }
+        .onChange(of: hideBorder) { _ in regenerateSampleIfNeeded() }
         .onChange(of: printMedia) { _ in regenerateSampleIfNeeded() }
         .onChange(of: printerName) { _ in regenerateSampleIfNeeded() }
         .onChange(of: calibration) { _ in regenerateSampleIfNeeded() }
@@ -115,11 +117,11 @@ enum WaybillPreviewSamplePDF {
         .appendingPathComponent("tabooprint", isDirectory: true)
         .appendingPathComponent("preview-samples", isDirectory: true)
 
-    static func writeSample(to outputDirectory: URL = sampleDirectory, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false, paperSize: PaperSize = PaperCatalog.default, calibration: PrinterCalibration = .identity) throws -> URL {
+    static func writeSample(to outputDirectory: URL = sampleDirectory, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false, hideBorder: Bool = false, paperSize: PaperSize = PaperCatalog.default, calibration: PrinterCalibration = .identity) throws -> URL {
         let renderer = NativeWaybillRenderer()
         // 文件名随所有影响渲染的输入变化，确保 URL 改变后 PDFView 一定重新加载。
         let calToken = "\(Int((calibration.offsetXMM * 10).rounded()))_\(Int((calibration.offsetYMM * 10).rounded()))_\(calibration.rotationDegrees)_\(Int((calibration.scaleRatio * 100).rounded()))_\(calibration.adaptivePaper ? "a" : "f")"
-        let variantTaskID = "\(taskID)-\(hideTaoLogo ? "1" : "0")\(hideCourierPackage ? "1" : "0")-\(paperSize.id)-\(calToken)"
+        let variantTaskID = "\(taskID)-\(hideTaoLogo ? "1" : "0")\(hideCourierPackage ? "1" : "0")\(hideBorder ? "1" : "0")-\(paperSize.id)-\(calToken)"
         let result = try renderer.render(
             payload: try samplePayload(for: .sample),
             outputDirectory: outputDirectory,
@@ -128,6 +130,7 @@ enum WaybillPreviewSamplePDF {
             paperSize: paperSize,
             hideTaoLogo: hideTaoLogo,
             hideCourierPackage: hideCourierPackage,
+            hideBorder: hideBorder,
             calibration: calibration
         )
         return result.url

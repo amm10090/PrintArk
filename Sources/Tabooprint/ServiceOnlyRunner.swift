@@ -17,7 +17,8 @@ enum ServiceOnlyRunner {
             dedupe: value(after: "--print-dedupe", in: arguments) != "false",
             dedupeWindowMinutes: Int((Double(value(after: "--dedupe-window-ms", in: arguments) ?? "600000") ?? 600000) / 60000),
             hideTaoLogo: value(after: "--hide-tao-logo", in: arguments) == "true",
-            hideCourierPackage: value(after: "--hide-courier-package", in: arguments) == "true"
+            hideCourierPackage: value(after: "--hide-courier-package", in: arguments) == "true",
+            hideBorder: value(after: "--hide-border", in: arguments) == "true"
         )
         let configuration = PrintServiceConfiguration(
             host: value(after: "--host", in: arguments) ?? "127.0.0.1",

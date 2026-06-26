@@ -13,6 +13,7 @@ enum SettingsKeys {
     static let dedupeWindowMinutes = "tabooprint.dedupeWindowMinutes"
     static let printHideTaoLogo = "tabooprint.printHideTaoLogo"
     static let printHideCourierPackage = "tabooprint.printHideCourierPackage"
+    static let printHideBorder = "tabooprint.printHideBorder"
     static let printFlip = "tabooprint.printFlip"
     static let printerCalibrations = "tabooprint.printerCalibrations"
 }
@@ -162,6 +163,7 @@ struct PrintSettings {
     var dedupeWindowMinutes: Int
     var hideTaoLogo: Bool = false
     var hideCourierPackage: Bool = false
+    var hideBorder: Bool = false
     var flipPrint: Bool = false
     // 按打印机校准（由 resolvedPrintSettings() 从 AppModel.printerCalibrations 注入，不读扁平键）。
     var offsetXMM: Double = 0
@@ -185,6 +187,7 @@ struct PrintSettings {
         let dedupeWindowMinutes = defaults.object(forKey: SettingsKeys.dedupeWindowMinutes) as? Int ?? 10
         let hideTaoLogo = defaults.object(forKey: SettingsKeys.printHideTaoLogo) as? Bool ?? false
         let hideCourierPackage = defaults.object(forKey: SettingsKeys.printHideCourierPackage) as? Bool ?? false
+        let hideBorder = defaults.object(forKey: SettingsKeys.printHideBorder) as? Bool ?? false
         let flipPrint = defaults.object(forKey: SettingsKeys.printFlip) as? Bool ?? false
         return PrintSettings(
             printerName: printerName.isEmpty ? "TAOBAO" : printerName,
@@ -195,6 +198,7 @@ struct PrintSettings {
             dedupeWindowMinutes: dedupeWindowMinutes,
             hideTaoLogo: hideTaoLogo,
             hideCourierPackage: hideCourierPackage,
+            hideBorder: hideBorder,
             flipPrint: flipPrint
         )
     }

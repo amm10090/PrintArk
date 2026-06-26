@@ -10,6 +10,7 @@ struct PrintPipelineInspector: View {
     @AppStorage(SettingsKeys.dedupeWindowMinutes) private var duplicateWindowMinutes = 10
     @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = false
     @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = false
+    @AppStorage(SettingsKeys.printHideBorder) private var hideBorder = false
 
     private var printers: [PrinterDevice] {
         var devices = model.printerDevices
@@ -45,7 +46,8 @@ struct PrintPipelineInspector: View {
                 LabelContentCard(
                     model: model,
                     hideTaoLogo: $hideTaoLogo,
-                    hideCourierPackage: $hideCourierPackage
+                    hideCourierPackage: $hideCourierPackage,
+                    hideBorder: $hideBorder
                 )
 
                 RecentJobsCard(jobs: model.printJobs)
@@ -130,6 +132,7 @@ struct LabelContentCard: View {
     @ObservedObject var model: AppModel
     @Binding var hideTaoLogo: Bool
     @Binding var hideCourierPackage: Bool
+    @Binding var hideBorder: Bool
 
     var body: some View {
         SettingsCard(title: "面单内容", subtitle: "选择是否打印这些标记。") {
@@ -139,6 +142,9 @@ struct LabelContentCard: View {
 
                 Toggle("不打印右上角的“快递包裹”", isOn: $hideCourierPackage)
                     .onChange(of: hideCourierPackage) { _ in model.applyPrintSettings() }
+
+                Toggle("不打印面单外边框", isOn: $hideBorder)
+                    .onChange(of: hideBorder) { _ in model.applyPrintSettings() }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
