@@ -222,6 +222,11 @@ final class AppModel: NSObject, ObservableObject {
     /// 因为 @AppStorage 无法按打印机名动态建键。
     @Published var printerCalibrations: [String: PrinterCalibration] = AppModel.loadCalibrations()
 
+    /// 当前预览 PDF 里**已烘焙**的校准值。预览层叠加「当前校准 − bakedCalibration」的
+    /// 增量变换实现实时平滑预览；每当 latestPreviewPDF 的 URL 变化（web 端打单或内容类
+    /// 重渲染），同步为当前打印机校准，使增量归零、切换无跳变。
+    @Published var bakedCalibration: PrinterCalibration = .identity
+
     private let printService = NativePrintService()
     private var pollingTimer: Timer?
     private var logViewerLineBaseline = 0
@@ -295,8 +300,16 @@ final class AppModel: NSObject, ObservableObject {
         UserDefaults.standard.set(data, forKey: SettingsKeys.printerCalibrations)
     }
 
-    /// 立即应用当前打印设置，并在可能时重渲染最近一张真实面单预览。
+    /// 应用当前打印设置。预览的实时变化由 `printerCalibrations`（@Published）驱动的
+    /// 增量变换层负责，像素级精确且无需重绘 PDF —— 因此纯校准变化**不重渲染预览**，
+    /// 只把设置推给服务供下次打印使用，彻底消除每次步进都闪屏的问题。
     func applyPrintSettings() {
+        printService.updateConfiguration(resolvedPrintSettings())
+    }
+
+    /// 立即按当前设置重烘焙最近一张面单并刷新快照。
+    /// 用于内容类变化（隐藏标记、纸张、打印机切换）等确实需要重绘 PDF 的场景。
+    func rebakePreviewNow() {
         let didRerender = printService.applyPrintSettings(resolvedPrintSettings())
         apply(snapshot: printService.snapshot())
         if didRerender {
@@ -362,7 +375,13 @@ final class AppModel: NSObject, ObservableObject {
         recentTasks = Array(snapshot.recentTasks.prefix(20))
         printJobs = Array(snapshot.printJobs.prefix(12))
         printerDevices = snapshot.printerDevices
+        // 预览 PDF 的 URL 变化意味着烘焙了新内容（web 端打单或自身防抖重烘焙），
+        // 此时其中烘焙的校准就是当前打印机校准——同步 bakedCalibration 令增量变换归零。
+        let previousPreview = latestPreviewPDF
         latestPreviewPDF = snapshot.latestPreviewPDF
+        if let url = snapshot.latestPreviewPDF, url != previousPreview {
+            bakedCalibration = printerCalibrations[PrintSettings.current.printerName] ?? .identity
+        }
         lastRawLogLineCount = snapshot.rawLogLines.count
 
         let startIndex = min(logViewerLineBaseline, snapshot.rawLogLines.count)

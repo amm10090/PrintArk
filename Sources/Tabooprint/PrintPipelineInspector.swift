@@ -39,7 +39,7 @@ struct PrintPipelineInspector: View {
                     duplicateWindowMinutes: $duplicateWindowMinutes,
                     printers: printers
                 )
-                .onChange(of: printerName) { _ in model.applyPrintSettings() }
+                .onChange(of: printerName) { _ in model.rebakePreviewNow() }
 
                 PrinterCalibrationCard(model: model, printerName: printerName)
 
@@ -138,13 +138,13 @@ struct LabelContentCard: View {
         SettingsCard(title: "面单内容", subtitle: "选择是否打印这些标记。") {
             VStack(alignment: .leading, spacing: 12) {
                 Toggle("不打印左上角的“淘”字", isOn: $hideTaoLogo)
-                    .onChange(of: hideTaoLogo) { _ in model.applyPrintSettings() }
+                    .onChange(of: hideTaoLogo) { _ in model.rebakePreviewNow() }
 
                 Toggle("不打印右上角的“快递包裹”", isOn: $hideCourierPackage)
-                    .onChange(of: hideCourierPackage) { _ in model.applyPrintSettings() }
+                    .onChange(of: hideCourierPackage) { _ in model.rebakePreviewNow() }
 
                 Toggle("不打印面单外边框", isOn: $hideBorder)
-                    .onChange(of: hideBorder) { _ in model.applyPrintSettings() }
+                    .onChange(of: hideBorder) { _ in model.rebakePreviewNow() }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

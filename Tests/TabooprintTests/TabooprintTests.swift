@@ -99,6 +99,26 @@ final class TabooprintTests: XCTestCase {
         XCTAssertEqual(mediaBox.height, 180 * 72 / 25.4, accuracy: 0.01)
     }
 
+    func testNativeRendererCalibrationTokenChangesFilename() throws {
+        // 默认校准保持纯 taskID 文件名（兼容协议回放与既有断言）。
+        XCTAssertEqual(NativeWaybillRenderer.calibrationToken(.identity), "")
+
+        let renderer = NativeWaybillRenderer()
+        let outputDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+        let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
+
+        let plain = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "TASK")
+        XCTAssertEqual(plain.fileName, "TASK.pdf")
+
+        // 非默认校准产出不同文件名，使 latestPreviewPDF/PDFView 能感知 URL 变化并刷新。
+        var calibration = PrinterCalibration.identity
+        calibration.offsetXMM = 2.5
+        let shifted = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "TASK", calibration: calibration)
+        XCTAssertNotEqual(shifted.fileName, plain.fileName)
+        XCTAssertTrue(shifted.fileName.hasPrefix("TASK-cal"))
+    }
+
     func testNativeRendererUsesNativeContentBoxForMatchingPaper() throws {
         let renderer = NativeWaybillRenderer()
         let outputDir = FileManager.default.temporaryDirectory

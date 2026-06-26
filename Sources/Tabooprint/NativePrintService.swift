@@ -197,11 +197,10 @@ final class NativePrintService: @unchecked Sendable {
         return CommandResult(exitCode: startResult.exitCode, output: output)
     }
 
-    /// 应用最新的打印设置，并在已有渲染上下文时按新设置重渲染最近一张面单。
-    /// 返回是否实际重绘了预览。
-    @discardableResult
-    func applyPrintSettings(_ settings: PrintSettings) -> Bool {
-        let context = lock.withLock { () -> (payload: [String: JSONValue], requestID: String, taskID: String)? in
+    /// 仅更新服务配置（供下次打印使用），不重渲染预览。
+    /// 校准类变化由预览的增量变换层实时呈现，无需重绘 PDF，避免闪烁。
+    func updateConfiguration(_ settings: PrintSettings) {
+        lock.withLock {
             configuration = PrintServiceConfiguration(
                 host: configuration.host,
                 webSocketPort: configuration.webSocketPort,
@@ -210,8 +209,16 @@ final class NativePrintService: @unchecked Sendable {
                 autoOpenPreview: configuration.autoOpenPreview,
                 printSettings: settings
             )
-            return lastRenderContext
         }
+    }
+
+    /// 应用最新的打印设置，并在已有渲染上下文时按新设置重渲染最近一张面单。
+    /// 返回是否实际重绘了预览。内容类变化（隐藏标记、纸张、打印机）走此路径；
+    /// 纯校准变化应改用 `updateConfiguration` 以避免预览闪烁。
+    @discardableResult
+    func applyPrintSettings(_ settings: PrintSettings) -> Bool {
+        updateConfiguration(settings)
+        let context = lock.withLock { lastRenderContext }
         guard let context else { return false }
         let docs = context.payload.object("task").array("documents").compactMap(\.objectValue).enumerated().map { index, document in
             ProtocolDocument(
@@ -616,6 +623,13 @@ final class NativePrintService: @unchecked Sendable {
         do {
             let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, calibration: calibration)
             lock.withLock {
+                // 清理同一 taskID 的旧校准变体，避免反复调校准时缓存与磁盘膨胀。
+                let prefix = safeFilename(taskID)
+                for (name, url) in renderedPDFs where name != result.fileName
+                    && (name == "\(prefix).pdf" || name.hasPrefix("\(prefix)-cal")) {
+                    try? FileManager.default.removeItem(at: url)
+                    renderedPDFs.removeValue(forKey: name)
+                }
                 renderedPDFs[result.fileName] = result.url
                 lastRenderContext = (payload: payload, requestID: requestID, taskID: taskID)
             }
@@ -945,7 +959,9 @@ final class NativeWaybillRenderer: @unchecked Sendable {
 
     func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String, paperSize: PaperSize = PaperCatalog.default, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false, hideBorder: Bool = false, calibration: PrinterCalibration = .identity) throws -> RenderResult {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        let fileName = "\(safeFilename(taskID)).pdf"
+        // 文件名随校准变化，使重烘焙产出新 URL，PDFView/latestPreviewPDF 才会刷新；
+        // 校准为默认值时保持纯 taskID 文件名（兼容既有断言与协议回放）。
+        let fileName = "\(safeFilename(taskID))\(Self.calibrationToken(calibration)).pdf"
         let outputURL = outputDirectory.appendingPathComponent(fileName)
         let task = payload.object("task")
         let documents = task.array("documents").compactMap(\.objectValue)
@@ -982,6 +998,16 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         }
         context.closePDF()
         return RenderResult(url: outputURL, fileName: fileName, documentIds: ids, error: nil)
+    }
+
+    /// 校准的文件名后缀：默认（identity）返回空串以保持纯 taskID 文件名；
+    /// 非默认时编码偏移/旋转/缩放/自适应，确保不同校准产出不同 URL。
+    static func calibrationToken(_ calibration: PrinterCalibration) -> String {
+        guard calibration != .identity else { return "" }
+        let ox = Int((calibration.offsetXMM * 10).rounded())
+        let oy = Int((calibration.offsetYMM * 10).rounded())
+        let sc = Int((calibration.scaleRatio * 100).rounded())
+        return "-cal\(ox)_\(oy)_\(calibration.rotationDegrees)_\(sc)_\(calibration.adaptivePaper ? "a" : "f")"
     }
 
     /// 把 74×126mm 内容盒水平居中、顶部对齐放入纸张外框。
