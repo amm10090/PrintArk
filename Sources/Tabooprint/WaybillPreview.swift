@@ -739,12 +739,29 @@ struct LabelPreviewWorkspace_Previews: PreviewProvider {
         Group {
             LabelPreviewWorkspace(pdfURL: nil, model: PreviewSamples.consoleModel)
                 .frame(width: 760, height: 720)
-                .previewDisplayName("预览工作台")
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("预览工作台 · 样本 PDF")
+
+            LabelPreviewWorkspace(pdfURL: nil, model: PreviewSamples.model(.calibrated))
+                .frame(width: 760, height: 720)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("预览工作台 · 校准")
 
             WaybillCanvas(document: .sample)
                 .padding(32)
                 .background(Color(nsColor: .windowBackgroundColor))
-                .previewDisplayName("面单画布")
+                .previewDisplayName("面单画布 · 默认")
+
+            WaybillCanvas(document: PreviewSamples.longDocument)
+                .padding(32)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .previewDisplayName("面单画布 · 长文本")
+
+            TechnicalSpecStrip(paperSize: PaperCatalog.match(media: "A4"))
+                .padding(24)
+                .frame(width: 640)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("技术规格 · A4")
         }
     }
 }

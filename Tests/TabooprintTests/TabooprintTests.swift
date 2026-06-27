@@ -39,6 +39,45 @@ final class TabooprintTests: XCTestCase {
         XCTAssertEqual(previewTask.resultDisplay, "预览成功")
     }
 
+    func testQueueJobsIncludePreviewTasksWithoutDuplicatingPrintJobs() {
+        let previewTask = RecentTask(
+            id: "RID-PREVIEW",
+            timestampText: "2026-06-24 12:00:00",
+            command: "print",
+            requestID: "RID-PREVIEW",
+            documentCount: 1,
+            mode: "default-preview",
+            result: "preview",
+            isInProgress: false
+        )
+        let physicalTask = RecentTask(
+            id: "RID-PHYSICAL",
+            timestampText: "2026-06-24 12:01:00",
+            command: "print",
+            requestID: "RID-PHYSICAL",
+            documentCount: 1,
+            mode: "respect-preview-flag",
+            result: "physical-dry-run",
+            isInProgress: false
+        )
+        let physicalJob = PrintJob(
+            id: "RID-PHYSICAL",
+            waybillCode: "TASK-PHYSICAL",
+            printerName: "TAOBAO",
+            pdfPath: "/tmp/TASK-PHYSICAL.pdf",
+            status: .dryRun,
+            errorMessage: nil,
+            commandText: "lpr -P TAOBAO /tmp/TASK-PHYSICAL.pdf"
+        )
+
+        let jobs = QueueJob.merged(printJobs: [physicalJob], recentTasks: [previewTask, physicalTask])
+
+        XCTAssertEqual(jobs.map(\.id), ["RID-PHYSICAL", "RID-PREVIEW"])
+        XCTAssertEqual(jobs[0].kind, .dryRun)
+        XCTAssertEqual(jobs[1].kind, .preview)
+        XCTAssertEqual(jobs[1].status, .done)
+    }
+
     func testPrintSettingsDefaultToDryRun() {
         let settings = PrintSettings(
             printerName: "TAOBAO",

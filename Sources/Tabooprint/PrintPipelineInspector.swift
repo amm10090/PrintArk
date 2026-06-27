@@ -50,7 +50,7 @@ struct PrintPipelineInspector: View {
                     hideBorder: $hideBorder
                 )
 
-                RecentJobsCard(jobs: model.printJobs)
+                RecentJobsCard(jobs: model.queueJobs)
             }
             .frame(maxWidth: .infinity)
             .padding(18)
@@ -277,16 +277,16 @@ struct DedupKeyRow: View {
 }
 
 struct RecentJobsCard: View {
-    let jobs: [PrintJob]
+    let jobs: [QueueJob]
 
     var body: some View {
-        SettingsCard(title: "最近任务", subtitle: "查看每次打印的文件和结果。") {
+        SettingsCard(title: "最近任务", subtitle: "查看每次打印和预览任务的文件和结果。") {
             if jobs.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("等待打印任务", systemImage: "tray")
                         .font(.subheadline.weight(.semibold))
 
-                    Text("从千牛提交后，这里会显示打印的文件和结果。")
+                    Text("从千牛提交后，这里会显示打印和预览的文件、状态与结果。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -303,7 +303,7 @@ struct RecentJobsCard: View {
 }
 
 struct RecentJobRow: View {
-    let job: PrintJob
+    let job: QueueJob
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -315,16 +315,16 @@ struct RecentJobRow: View {
                     Text(job.printerName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
 
                 Spacer()
 
-                Label(job.status.rawValue, systemImage: job.status.systemImage)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(job.status.color)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(job.status.color.opacity(0.12), in: Capsule())
+                VStack(alignment: .trailing, spacing: 6) {
+                    QueueKindBadge(kind: job.kind)
+                    QueueStatusBadge(status: job.status)
+                }
             }
 
             if !job.pdfPath.isEmpty {
@@ -432,8 +432,65 @@ struct PrinterStatusBadge: View {
 @MainActor
 struct PrintPipelineInspector_Previews: PreviewProvider {
     static var previews: some View {
-        PrintPipelineInspector(model: PreviewSamples.consoleModel)
-            .frame(width: 390, height: 760)
+        Group {
+            ForEach([
+                PreviewModelState.running,
+                .stoppedEmpty,
+                .error,
+                .busyQueue,
+                .calibrated,
+            ]) { state in
+                PrintPipelineInspector(model: PreviewSamples.model(state))
+                    .frame(width: 390, height: 760)
+                    .defaultAppStorage(PreviewSamples.previewDefaults)
+                    .previewDisplayName("设置面板 · \(state.title)")
+            }
+        }
+    }
+}
+
+@MainActor
+struct PrintSettingsCards_Previews: PreviewProvider {
+    static var previews: some View {
+        Group {
+            RecentJobsCard(jobs: [])
+                .padding(24)
+                .frame(width: 420)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("最近任务 · 空")
+
+            RecentJobsCard(jobs: PreviewSamples.model(.busyQueue).queueJobs)
+                .padding(24)
+                .frame(width: 420)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("最近任务 · 多状态")
+
+            RecentJobRow(job: PreviewSamples.model(.error).queueJobs.first(where: { $0.kind == .failure }) ?? PreviewSamples.model(.error).queueJobs[0])
+                .padding(24)
+                .frame(width: 420)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("任务行 · 失败")
+
+            PipelineSettingsCard(
+                selectedPrinter: PreviewSamples.unavailablePrinters[0],
+                printerName: .constant("TAOBAO"),
+                printMedia: .constant("A4"),
+                fitToPage: .constant(true),
+                duplicateProtection: .constant(false),
+                duplicateWindowMinutes: .constant(10),
+                printers: PreviewSamples.unavailablePrinters
+            )
+            .padding(24)
+            .frame(width: 420)
+            .defaultAppStorage(PreviewSamples.previewDefaults)
+            .previewDisplayName("打印设置 · 不可用打印机")
+
+            PrinterCalibrationCard(model: PreviewSamples.model(.calibrated), printerName: "TAOBAO")
+                .padding(24)
+                .frame(width: 420)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("打印机校准 · 警告")
+        }
     }
 }
 #endif
