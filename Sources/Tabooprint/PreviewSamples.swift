@@ -170,7 +170,41 @@ enum PreviewSamples {
         ),
     ]
 
-    static let recentTasks: [RecentTask] = [
+    /// 非 print 协议命令（握手 / 配置读写），供「协议」筛选项的命令行视图展示。
+    static let protocolTasks: [RecentTask] = [
+        RecentTask(
+            id: "proto-get-printers",
+            timestampText: "22:24:58",
+            command: "getPrinters",
+            requestID: "REQ-DEMO-PRN",
+            documentCount: 0,
+            mode: "default-preview",
+            result: "",
+            isInProgress: false
+        ),
+        RecentTask(
+            id: "proto-agent-info",
+            timestampText: "22:25:01",
+            command: "getAgentInfo",
+            requestID: "REQ-DEMO-AGENT",
+            documentCount: 0,
+            mode: "default-preview",
+            result: "",
+            isInProgress: false
+        ),
+        RecentTask(
+            id: "proto-global-config",
+            timestampText: "22:25:05",
+            command: "getGlobalConfig",
+            requestID: "REQ-DEMO-CFG",
+            documentCount: 0,
+            mode: "default-preview",
+            result: "",
+            isInProgress: true
+        ),
+    ]
+
+    static let recentTasks: [RecentTask] = protocolTasks + [
         RecentTask(
             id: "preview-success",
             timestampText: "22:25:31",

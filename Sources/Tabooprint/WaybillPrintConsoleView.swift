@@ -18,7 +18,6 @@ struct WaybillPrintConsoleView: View {
 enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
     case currentWaybill
     case printQueue
-    case recentTasks
     case payloadDocuments
     case currentVersion
     case csvImport
@@ -31,7 +30,6 @@ enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .currentWaybill: return "当前面单"
         case .printQueue: return "打印队列"
-        case .recentTasks: return "最近任务"
         case .payloadDocuments: return "多面单文档"
         case .currentVersion: return "当前版本"
         case .csvImport: return "CSV / Excel 导入"
@@ -44,7 +42,6 @@ enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .currentWaybill: return "doc.text"
         case .printQueue: return "tray.full"
-        case .recentTasks: return "clock"
         case .payloadDocuments: return "doc.on.doc"
         case .currentVersion: return "info.circle"
         case .csvImport: return "tablecells"
@@ -55,14 +52,14 @@ enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
 
     var isImplemented: Bool {
         switch self {
-        case .currentWaybill, .printQueue, .recentTasks, .payloadDocuments, .currentVersion:
+        case .currentWaybill, .printQueue, .payloadDocuments, .currentVersion:
             return true
         case .csvImport, .fieldMapping, .retryFailed:
             return false
         }
     }
 
-    static let printItems: [Self] = [.currentWaybill, .printQueue, .recentTasks]
+    static let printItems: [Self] = [.currentWaybill, .printQueue]
     static let batchItems: [Self] = [.payloadDocuments, .csvImport, .fieldMapping, .retryFailed]
     static let infoItems: [Self] = [.currentVersion]
 }
@@ -126,14 +123,6 @@ struct PrintWorkspaceContent: View {
             }
         case .printQueue:
             PrintQueueWorkspace(model: model)
-        case .recentTasks:
-            SidebarPage(
-                title: "最近任务",
-                subtitle: "最后刷新：\(model.lastRefreshedText)",
-                systemImage: "clock"
-            ) {
-                RecentTasksCard(tasks: model.recentTasks)
-            }
         case .payloadDocuments:
             SidebarPage(
                 title: "多面单文档",
@@ -199,6 +188,7 @@ enum PrintQueueFilter: String, CaseIterable, Identifiable {
     case queued
     case failed
     case done
+    case protocolLog
 
     var id: String { rawValue }
 
@@ -209,8 +199,12 @@ enum PrintQueueFilter: String, CaseIterable, Identifiable {
         case .queued: return "排队中"
         case .failed: return "失败"
         case .done: return "完成"
+        case .protocolLog: return "协议"
         }
     }
+
+    /// 协议筛选项展示非 print 命令（握手/配置读写），是只读诊断视图，与打印卡片互斥。
+    var isProtocol: Bool { self == .protocolLog }
 }
 
 enum QueueJobKind: Equatable {
@@ -381,6 +375,19 @@ struct PrintQueueWorkspace: View {
         }
     }
 
+    /// 协议视图数据源：非 print 命令（握手 / 配置读写）。
+    private var protocolTasks: [RecentTask] {
+        model.recentTasks.filter { $0.command != "print" }
+    }
+
+    private var filteredProtocolTasks: [RecentTask] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return protocolTasks }
+        return protocolTasks.filter {
+            $0.command.lowercased().contains(query) || $0.requestID.lowercased().contains(query)
+        }
+    }
+
     private var selectedJob: QueueJob? {
         if let selectedJobID, let found = jobs.first(where: { $0.id == selectedJobID }) {
             return found
@@ -399,15 +406,20 @@ struct PrintQueueWorkspace: View {
                     toggleAll: toggleAllFiltered
                 )
 
-                QueueListPanel(
-                    jobs: filteredJobs,
-                    selectedJobID: selectedJob?.id,
-                    selectedIDs: selectedIDs,
-                    selectJob: { openPreview($0) },
-                    toggleSelection: toggleSelection,
-                    showError: { showError($0) }
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if filter.isProtocol {
+                    ProtocolCommandList(tasks: filteredProtocolTasks)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    QueueListPanel(
+                        jobs: filteredJobs,
+                        selectedJobID: selectedJob?.id,
+                        selectedIDs: selectedIDs,
+                        selectJob: { openPreview($0) },
+                        toggleSelection: toggleSelection,
+                        showError: { showError($0) }
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
             .background(QueueDesign.white)
             .onAppear {
@@ -418,14 +430,19 @@ struct PrintQueueWorkspace: View {
             .onChange(of: jobIDs) { _ in
                 pruneSelection()
             }
-            .onChange(of: filter) { _ in
+            .onChange(of: filter) { newFilter in
+                if newFilter.isProtocol {
+                    // 协议视图为只读诊断列表，不参与卡片的批量选择 / 抽屉。
+                    selectedIDs.removeAll()
+                    dismissPanels()
+                }
                 keepSelectionVisible()
             }
             .onChange(of: searchText) { _ in
                 keepSelectionVisible()
             }
 
-            if !selectedIDs.isEmpty {
+            if !filter.isProtocol, !selectedIDs.isEmpty {
                 BulkSelectionBar(count: selectedIDs.count) {
                     selectedIDs.removeAll()
                 }
@@ -468,7 +485,10 @@ struct PrintQueueWorkspace: View {
     }
 
     private var counts: [PrintQueueFilter: Int] {
-        var result: [PrintQueueFilter: Int] = [.all: jobs.count, .printing: 0, .queued: 0, .failed: 0, .done: 0]
+        var result: [PrintQueueFilter: Int] = [
+            .all: jobs.count, .printing: 0, .queued: 0, .failed: 0, .done: 0,
+            .protocolLog: protocolTasks.count,
+        ]
         for job in jobs {
             result[job.status.filter, default: 0] += 1
         }
@@ -833,7 +853,7 @@ struct PrintQueueToolbar: View {
                     .font(.system(size: 14))
                     .foregroundStyle(QueueDesign.borderMid)
 
-                TextField("搜索运单号 / 收件人", text: $searchText)
+                TextField(filter.isProtocol ? "搜索命令 / requestID" : "搜索运单号 / 收件人", text: $searchText)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
             }
@@ -841,12 +861,14 @@ struct PrintQueueToolbar: View {
             .frame(width: 250, height: 30)
             .background(QueueDesign.control, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            Button(action: toggleAll) {
-                Text(allSelected ? "取消" : "全选")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(minWidth: 44)
+            if !filter.isProtocol {
+                Button(action: toggleAll) {
+                    Text(allSelected ? "取消" : "全选")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(minWidth: 44)
+                }
+                .buttonStyle(QueuePlainButtonStyle())
             }
-            .buttonStyle(QueuePlainButtonStyle())
         }
         .padding(.horizontal, 18)
         .frame(height: 56)
@@ -1375,37 +1397,76 @@ struct SidebarPage<Content: View>: View {
     }
 }
 
-struct RecentTasksCard: View {
+/// 协议命令行视图：展示非 print 协议命令（握手 / 配置读写）的只读诊断列表。
+/// 行样式迁移自旧版「最近任务」卡片：command 粗体 + requestID 等宽 + 结果状态色。
+struct ProtocolCommandList: View {
     let tasks: [RecentTask]
 
     var body: some View {
-        SettingsCard(title: "最近任务", subtitle: "浏览器请求和处理结果。") {
+        VStack(spacing: 0) {
             if tasks.isEmpty {
-                Label("暂无任务", systemImage: "clock")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                ProtocolEmptyListView()
             } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(tasks) { task in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(task.command)
-                                    .font(.subheadline.weight(.semibold))
-
-                                Text(task.requestID)
-                                    .font(.system(.caption2, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Spacer()
-
-                            StatusText(text: task.resultDisplay, color: task.isInProgress ? .orange : .green)
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(tasks) { task in
+                            ProtocolCommandRow(task: task)
                         }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(QueueDesign.canvas)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(QueueDesign.borderSoft)
+                .frame(width: 0.5)
+        }
+    }
+}
+
+struct ProtocolCommandRow: View {
+    let task: RecentTask
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(task.command)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(QueueDesign.ink)
+
+                Text(task.requestID)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(QueueDesign.neutral)
+                    .textSelection(.enabled)
+            }
+
+            Spacer(minLength: 0)
+
+            StatusText(text: task.resultDisplay, color: task.isInProgress ? .orange : .green)
+        }
+        .padding(.vertical, 11)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(QueueDesign.borderSoft)
+                .frame(height: 0.5)
+        }
+    }
+}
+
+struct ProtocolEmptyListView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "antenna.radiowaves.left.and.right")
+                .font(.system(size: 38, weight: .semibold))
+            Text("暂无协议命令")
+                .font(.system(size: 13))
+        }
+        .foregroundStyle(QueueDesign.borderMid)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
