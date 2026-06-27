@@ -342,7 +342,9 @@ extension PrintJobStatus {
         case .pending:
             return .queued
         case .dryRun, .submitted:
-            return .printing
+            // lpr 提交是同步的：模拟/真实提交成功即终态，没有异步「打印中」持续态。
+            // 持续态只属于 isInProgress 的任务，见 RecentTask.queueStatus。
+            return .done
         case .skippedDuplicate:
             return .done
         case .failed:
@@ -736,7 +738,8 @@ private extension RecentTask {
         case "document-not-found", "decrypt-failure", "physical-print-failed":
             return .failed
         case "physical-dry-run", "physical-print":
-            return .printing
+            // finish 阶段的成功结果即终态；持续态只属于 isInProgress。
+            return .done
         case "physical-duplicate-suppressed", "preview":
             return .done
         default:
