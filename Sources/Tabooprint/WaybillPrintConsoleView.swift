@@ -432,31 +432,35 @@ struct PrintQueueWorkspace: View {
             if let previewJob {
                 QueueDesign.scrim
                     .ignoresSafeArea()
-                    .onTapGesture { self.previewJob = nil }
+                    .transition(.opacity)
+                    .onTapGesture { dismissPanels() }
 
                 QueuePreviewDrawer(
                     job: previewJob,
                     pdfURL: previewURL(for: previewJob),
                     model: model
                 ) {
-                    self.previewJob = nil
+                    dismissPanels()
                 }
                 .frame(width: 640)
-                .transition(.move(edge: .trailing))
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
             if let errorJob {
                 QueueDesign.scrim
                     .ignoresSafeArea()
-                    .onTapGesture { self.errorJob = nil }
+                    .transition(.opacity)
+                    .onTapGesture { dismissPanels() }
 
                 QueueErrorDrawer(job: errorJob) {
-                    self.errorJob = nil
+                    dismissPanels()
                 }
                 .frame(width: 420)
-                .transition(.move(edge: .trailing))
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .animation(QueueDesign.drawerAnimation, value: previewJob)
+        .animation(QueueDesign.drawerAnimation, value: errorJob)
         .navigationTitle("打印队列")
     }
 
@@ -490,6 +494,11 @@ struct PrintQueueWorkspace: View {
         selectedJobID = job.id
         previewJob = nil
         errorJob = job
+    }
+
+    private func dismissPanels() {
+        previewJob = nil
+        errorJob = nil
     }
 
     private func previewURL(for job: QueueJob) -> URL? {
