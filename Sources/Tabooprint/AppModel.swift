@@ -272,6 +272,40 @@ final class AppModel: NSObject, ObservableObject {
         launchService(action: .restart)
     }
 
+    /// 失败任务重试：复用已渲染并落盘的 PDF 重新执行 lpr，绕过 10 分钟去重，沿用当前 dryRun 设置。
+    /// Process 在后台执行避免阻塞主线程，结果回主线程写 lastActionOutput 并刷新快照。
+    func retry(job: QueueJob) {
+        retry(requestID: job.id, pdfPath: job.pdfPath, printerName: job.printerName, waybillCode: job.waybillCode)
+    }
+
+    /// 失败列表（侧边栏「失败重试」页）用 PrintJob 触发重试的入口。
+    func retry(job: PrintJob) {
+        retry(requestID: job.id, pdfPath: job.pdfPath, printerName: job.printerName, waybillCode: job.waybillCode)
+    }
+
+    private func retry(requestID: String, pdfPath: String, printerName: String, waybillCode: String) {
+        guard !pdfPath.isEmpty else {
+            lastActionOutput = "重试失败：任务 \(waybillCode) 缺少 PDF 路径"
+            return
+        }
+        lastActionOutput = "正在重试：\(waybillCode)…"
+        let service = printService
+        Task.detached {
+            let job = service.retryPhysicalPrint(requestID: requestID, pdfPath: pdfPath, printerName: printerName)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if job.ok {
+                    self.lastActionOutput = job.dryRun
+                        ? "已重试（模拟）：\(waybillCode) · \(job.printerName)"
+                        : "已重试打印：\(waybillCode) · \(job.printerName)"
+                } else {
+                    self.lastActionOutput = "重试失败：\(waybillCode) · \(job.error ?? "未知错误")"
+                }
+                self.refresh()
+            }
+        }
+    }
+
     /// 当前生效的打印设置：以 debugPreview 为唯一来源翻译 dryRun，
     /// 避免读到无人写入的历史 `printDryRun` 键（恒为 true）而把真实打印误降级为模拟。
     private func resolvedPrintSettings() -> PrintSettings {

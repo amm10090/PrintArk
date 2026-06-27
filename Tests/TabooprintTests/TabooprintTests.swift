@@ -198,6 +198,58 @@ final class TabooprintTests: XCTestCase {
         XCTAssertFalse(settings.dedupe)
     }
 
+    func testRetryPhysicalPrintMissingPDFReturnsError() {
+        let service = NativePrintService()
+        service.updateConfiguration(PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10))
+
+        let job = service.retryPhysicalPrint(requestID: "RID-MISSING", pdfPath: "/tmp/tabooprint/does-not-exist-\(UUID().uuidString).pdf", printerName: "TAOBAO")
+
+        XCTAssertFalse(job.ok)
+        XCTAssertNotNil(job.error)
+        XCTAssertTrue(job.error?.contains("PDF 不存在") ?? false)
+    }
+
+    func testRetryPhysicalPrintDryRunEmitsRetryPhaseAndSkipsProcess() throws {
+        let service = NativePrintService()
+        service.updateConfiguration(PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10))
+
+        let captured = LogCollector()
+        service.setLogSink { line in captured.append(line) }
+
+        // 落盘一个真实存在的最小 PDF，触发重打路径（dryRun 下不跑 lpr）。
+        let pdfURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("retry-\(UUID().uuidString).pdf")
+        try Data("%PDF-1.4\n%%EOF\n".utf8).write(to: pdfURL)
+        defer { try? FileManager.default.removeItem(at: pdfURL) }
+
+        let job = service.retryPhysicalPrint(requestID: "RID-RETRY", pdfPath: pdfURL.path, printerName: "TAOBAO")
+
+        XCTAssertTrue(job.ok)
+        XCTAssertTrue(job.dryRun)
+        XCTAssertFalse(job.duplicate)
+        XCTAssertFalse(job.commandText.isEmpty)
+        // dryRun 重试发出 retry-dry-run phase，不发 retry-submitted（未跑 Process）。
+        XCTAssertTrue(captured.lines.contains { $0.contains("retry-dry-run") })
+        XCTAssertFalse(captured.lines.contains { $0.contains("retry-submitted") })
+    }
+
+    func testRetryPhysicalPrintBypassesDedupeHistory() throws {
+        let service = NativePrintService()
+        service.updateConfiguration(PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10))
+
+        let pdfURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("retry-dedupe-\(UUID().uuidString).pdf")
+        try Data("%PDF-1.4\n%%EOF\n".utf8).write(to: pdfURL)
+        defer { try? FileManager.default.removeItem(at: pdfURL) }
+
+        // 连续两次重试同一 PDF：因为重试不查 / 不写去重历史，两次都应成功提交（非 duplicate）。
+        let first = service.retryPhysicalPrint(requestID: "RID-DEDUPE", pdfPath: pdfURL.path, printerName: "TAOBAO")
+        let second = service.retryPhysicalPrint(requestID: "RID-DEDUPE", pdfPath: pdfURL.path, printerName: "TAOBAO")
+
+        XCTAssertTrue(first.ok)
+        XCTAssertFalse(first.duplicate)
+        XCTAssertTrue(second.ok)
+        XCTAssertFalse(second.duplicate, "重试必须绕过去重，第二次不应被 duplicate 抑制")
+    }
+
     func testJSONValueRoundTripsCommandPayload() throws {
         let value = try JSONValue.parse(#"{"cmd":"getAgentInfo","requestID":"RID","preview":true}"#)
         let object = try XCTUnwrap(value.objectValue)
@@ -840,5 +892,19 @@ private final class TestWebSocketClient {
             data.append(contentsOf: try read(count: 1))
         }
         return data
+    }
+}
+
+/// 线程安全的日志收集器，供测试用 setLogSink（@Sendable 闭包）捕获 emit 的事件行。
+final class LogCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    func append(_ line: String) {
+        lock.withLock { storage.append(line) }
+    }
+
+    var lines: [String] {
+        lock.withLock { storage }
     }
 }

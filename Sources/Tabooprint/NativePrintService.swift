@@ -770,13 +770,45 @@ final class NativePrintService: @unchecked Sendable {
             )
         }
 
+        return runLpr(
+            requestID: requestID,
+            taskID: taskID,
+            printerName: printerName,
+            pdfURL: pdfURL,
+            lprArgs: lprArgs,
+            commandText: commandText,
+            docsCount: docs.count,
+            config: config,
+            documentsJSON: documentsJSON,
+            phasePrefix: "",
+            dedupeKey: dedupeKey
+        )
+    }
+
+    /// 执行 lpr 的核心块（emit 事件 + dryRun 分支 + Process 跑 /usr/bin/lpr + 记入去重历史 + 返回 PhysicalPrintJob）。
+    /// 从 `submitPhysicalPrint` 抽出以便正常打印与失败重试复用同一份执行逻辑。
+    /// - `phasePrefix`：正常打印传 ""，重试打印传 "retry-"，用于区分事件 phase 命名。
+    /// - `dedupeKey`：传 nil 时跳过 `rememberPhysicalPrint`（重试路径不写去重历史，避免无指纹脏键）。
+    private func runLpr(
+        requestID: String,
+        taskID: String,
+        printerName: String,
+        pdfURL: URL,
+        lprArgs: [String],
+        commandText: String,
+        docsCount: Int,
+        config: PrintServiceConfiguration,
+        documentsJSON: JSONValue,
+        phasePrefix: String,
+        dedupeKey: String?
+    ) -> PhysicalPrintJob {
         emit("print-job", [
-            "phase": .string(config.printSettings.dryRun ? "dry-run" : "submit"),
+            "phase": .string("\(phasePrefix)\(config.printSettings.dryRun ? "dry-run" : "submit")"),
             "command": .string("lpr"),
             "requestID": .string(requestID),
             "taskID": .string(taskID),
             "printer": .string(printerName),
-            "documentCount": .number(Double(docs.count)),
+            "documentCount": .number(Double(docsCount)),
             "pdfPath": .string(pdfURL.path),
             "commandText": .string(commandText),
             "media": .string(config.printSettings.media),
@@ -784,15 +816,17 @@ final class NativePrintService: @unchecked Sendable {
         ])
 
         if config.printSettings.dryRun {
-            rememberPhysicalPrint(dedupeKey, item: PhysicalPrintHistoryItem(
-                timestampMs: Int(Date().timeIntervalSince1970 * 1000),
-                requestID: requestID,
-                taskID: taskID,
-                printerName: printerName,
-                commandText: commandText,
-                pdfPath: pdfURL.path,
-                dryRun: true
-            ), settings: config.printSettings)
+            if let dedupeKey {
+                rememberPhysicalPrint(dedupeKey, item: PhysicalPrintHistoryItem(
+                    timestampMs: Int(Date().timeIntervalSince1970 * 1000),
+                    requestID: requestID,
+                    taskID: taskID,
+                    printerName: printerName,
+                    commandText: commandText,
+                    pdfPath: pdfURL.path,
+                    dryRun: true
+                ), settings: config.printSettings)
+            }
             return PhysicalPrintJob(ok: true, dryRun: true, duplicate: false, printerName: printerName, commandText: commandText, pdfURL: pdfURL, error: nil)
         }
 
@@ -810,34 +844,36 @@ final class NativePrintService: @unchecked Sendable {
                 throw NSError(domain: "Tabooprint", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr.isEmpty ? "lpr failed" : stderr])
             }
             emit("print-job", [
-                "phase": .string("submitted"),
+                "phase": .string("\(phasePrefix)submitted"),
                 "command": .string("lpr"),
                 "requestID": .string(requestID),
                 "taskID": .string(taskID),
                 "printer": .string(printerName),
-                "documentCount": .number(Double(docs.count)),
+                "documentCount": .number(Double(docsCount)),
                 "pdfPath": .string(pdfURL.path),
                 "commandText": .string(commandText),
                 "documents": documentsJSON,
             ])
-            rememberPhysicalPrint(dedupeKey, item: PhysicalPrintHistoryItem(
-                timestampMs: Int(Date().timeIntervalSince1970 * 1000),
-                requestID: requestID,
-                taskID: taskID,
-                printerName: printerName,
-                commandText: commandText,
-                pdfPath: pdfURL.path,
-                dryRun: false
-            ), settings: config.printSettings)
+            if let dedupeKey {
+                rememberPhysicalPrint(dedupeKey, item: PhysicalPrintHistoryItem(
+                    timestampMs: Int(Date().timeIntervalSince1970 * 1000),
+                    requestID: requestID,
+                    taskID: taskID,
+                    printerName: printerName,
+                    commandText: commandText,
+                    pdfPath: pdfURL.path,
+                    dryRun: false
+                ), settings: config.printSettings)
+            }
             return PhysicalPrintJob(ok: true, dryRun: false, duplicate: false, printerName: printerName, commandText: commandText, pdfURL: pdfURL, error: nil)
         } catch {
             emit("print-job", [
-                "phase": .string("failed"),
+                "phase": .string("\(phasePrefix)failed"),
                 "command": .string("lpr"),
                 "requestID": .string(requestID),
                 "taskID": .string(taskID),
                 "printer": .string(printerName),
-                "documentCount": .number(Double(docs.count)),
+                "documentCount": .number(Double(docsCount)),
                 "pdfPath": .string(pdfURL.path),
                 "commandText": .string(commandText),
                 "error": .string(error.localizedDescription),
@@ -845,6 +881,49 @@ final class NativePrintService: @unchecked Sendable {
             ])
             return PhysicalPrintJob(ok: false, dryRun: false, duplicate: false, printerName: printerName, commandText: commandText, pdfURL: pdfURL, error: error.localizedDescription)
         }
+    }
+
+    /// 失败任务重试：重打已渲染并落盘的 PDF，**绕过 10 分钟去重检查**（D2），沿用当前 dryRun 与打印设置。
+    /// 不重跑解密/渲染（D1）。`dedupeKey` 传 nil 让 `runLpr` 跳过 rememberPhysicalPrint —— 重试不写去重历史。
+    /// PDF 文件缺失时返回明确错误、不崩溃。
+    func retryPhysicalPrint(requestID: String, pdfPath: String, printerName: String) -> PhysicalPrintJob {
+        let config = lock.withLock { configuration }
+        // 打印机名优先用失败任务记录的值，为空时回退到当前配置/任务默认，并做脏名清洗。
+        let resolvedRaw = printerName.isEmpty ? config.printSettings.printerName : printerName
+        let resolvedName = sanitizePrinterName(resolvedRaw)
+
+        guard FileManager.default.fileExists(atPath: pdfPath) else {
+            let message = "重试失败：PDF 不存在（\(pdfPath)）"
+            emit("print-job", [
+                "phase": .string("retry-failed"),
+                "command": .string("lpr"),
+                "requestID": .string(requestID),
+                "printer": .string(resolvedName),
+                "pdfPath": .string(pdfPath),
+                "error": .string(message),
+            ])
+            return PhysicalPrintJob(ok: false, dryRun: config.printSettings.dryRun, duplicate: false, printerName: resolvedName, commandText: "", pdfURL: URL(fileURLWithPath: pdfPath), error: message)
+        }
+
+        let pdfURL = URL(fileURLWithPath: pdfPath)
+        // 沿用 flipPrint 旋转副本逻辑，与正常打印保持一致。
+        let printURL = config.printSettings.flipPrint ? makeRotatedPDFForPrinting(source: pdfURL) : pdfURL
+        let lprArgs = buildLprArgs(printerName: resolvedName, pdfURL: printURL, settings: config.printSettings)
+        let commandText = (["/usr/bin/lpr"] + lprArgs).map(shellDisplay(_:)).joined(separator: " ")
+
+        return runLpr(
+            requestID: requestID,
+            taskID: requestID,
+            printerName: resolvedName,
+            pdfURL: pdfURL,
+            lprArgs: lprArgs,
+            commandText: commandText,
+            docsCount: 0,
+            config: config,
+            documentsJSON: .array([]),
+            phasePrefix: "retry-",
+            dedupeKey: nil
+        )
     }
 
     /// 为物理打印生成一个 180° 旋转的 PDF 副本（PDF 标准 /Rotate，CUPS 栅格化必然遵守），
@@ -1019,7 +1098,7 @@ struct ExtractedDocumentInfo: Sendable {
     let district: String
 }
 
-private struct PhysicalPrintJob: Sendable {
+struct PhysicalPrintJob: Sendable {
     let ok: Bool
     let dryRun: Bool
     let duplicate: Bool
@@ -2018,9 +2097,12 @@ extension NativePrintService {
                   let id = event["requestID"]?.stringValue ?? event["taskID"]?.stringValue else {
                 continue
             }
+            // 重试路径的 phase 带 "retry-" 前缀（retry-dry-run / retry-submitted / retry-failed），
+            // 去掉前缀后与正常打印复用同一套状态映射，避免重试后任务被错判为「待打印」。
             let phase = event.string("phase")
+            let normalizedPhase = phase.hasPrefix("retry-") ? String(phase.dropFirst("retry-".count)) : phase
             let status: PrintJobStatus
-            switch phase {
+            switch normalizedPhase {
             case "duplicate-suppressed":
                 status = .skippedDuplicate
             case "dry-run":

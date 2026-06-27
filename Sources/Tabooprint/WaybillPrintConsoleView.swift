@@ -18,10 +18,7 @@ struct WaybillPrintConsoleView: View {
 enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
     case currentWaybill
     case printQueue
-    case payloadDocuments
     case currentVersion
-    case csvImport
-    case fieldMapping
     case retryFailed
 
     var id: String { rawValue }
@@ -30,10 +27,7 @@ enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .currentWaybill: return "当前面单"
         case .printQueue: return "打印队列"
-        case .payloadDocuments: return "多面单文档"
         case .currentVersion: return "当前版本"
-        case .csvImport: return "CSV / Excel 导入"
-        case .fieldMapping: return "字段映射"
         case .retryFailed: return "失败重试"
         }
     }
@@ -42,25 +36,20 @@ enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .currentWaybill: return "doc.text"
         case .printQueue: return "tray.full"
-        case .payloadDocuments: return "doc.on.doc"
         case .currentVersion: return "info.circle"
-        case .csvImport: return "tablecells"
-        case .fieldMapping: return "arrow.left.arrow.right"
         case .retryFailed: return "arrow.triangle.2.circlepath"
         }
     }
 
     var isImplemented: Bool {
         switch self {
-        case .currentWaybill, .printQueue, .payloadDocuments, .currentVersion:
+        case .currentWaybill, .printQueue, .currentVersion, .retryFailed:
             return true
-        case .csvImport, .fieldMapping, .retryFailed:
-            return false
         }
     }
 
     static let printItems: [Self] = [.currentWaybill, .printQueue]
-    static let batchItems: [Self] = [.payloadDocuments, .csvImport, .fieldMapping, .retryFailed]
+    static let batchItems: [Self] = [.retryFailed]
     static let infoItems: [Self] = [.currentVersion]
 }
 
@@ -123,14 +112,6 @@ struct PrintWorkspaceContent: View {
             }
         case .printQueue:
             PrintQueueWorkspace(model: model)
-        case .payloadDocuments:
-            SidebarPage(
-                title: "多面单文档",
-                subtitle: "当前支持一次提交里的多张面单。",
-                systemImage: "doc.on.doc"
-            ) {
-                PayloadDocumentsCard(tasks: model.recentTasks)
-            }
         case .currentVersion:
             SidebarPage(
                 title: "当前版本",
@@ -139,17 +120,86 @@ struct PrintWorkspaceContent: View {
             ) {
                 VersionSummaryCard(model: model)
             }
-        case .csvImport, .fieldMapping, .retryFailed:
-            SidebarPage(
-                title: selection.title,
-                subtitle: "尚未接入当前版本。",
-                systemImage: selection.systemImage
-            ) {
-                SettingsCard(title: "未实现", subtitle: "这个入口已预留，后续实现后再启用。") {
-                    EmptyView()
+        case .retryFailed:
+            RetryFailedWorkspace(model: model)
+        }
+    }
+}
+
+/// 「失败重试」工作区：列出所有 status == .failed 的打印任务，每项可单独重试。
+/// 复用 model.printJobs（由事件日志重建，携带 pdfPath/printerName），重试走 model.retry(job:)。
+struct RetryFailedWorkspace: View {
+    @ObservedObject var model: AppModel
+
+    private var failedJobs: [PrintJob] {
+        model.printJobs.filter { $0.status == .failed }
+    }
+
+    var body: some View {
+        SidebarPage(
+            title: "失败重试",
+            subtitle: "重打已渲染的面单 PDF，绕过去重，沿用当前打印设置。",
+            systemImage: "arrow.triangle.2.circlepath"
+        ) {
+            if failedJobs.isEmpty {
+                SettingsCard(title: "暂无失败任务", subtitle: "所有打印任务都已成功或尚无失败记录。") {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.seal")
+                            .foregroundStyle(.green)
+                        Text("没有需要重试的失败任务。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                }
+            } else {
+                SettingsCard(title: "失败任务（\(failedJobs.count)）", subtitle: "逐项重试；重试遵循调试预览开关（dry-run 下仅记录命令）。") {
+                    VStack(spacing: 10) {
+                        ForEach(failedJobs) { job in
+                            RetryFailedRow(job: job) {
+                                model.retry(job: job)
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+struct RetryFailedRow: View {
+    let job: PrintJob
+    let onRetry: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(job.waybillCode.isEmpty ? job.id : job.waybillCode)
+                    .font(.system(size: 13, weight: .semibold))
+                    .monospacedDigit()
+                Text("打印机：\(job.printerName.isEmpty ? "未知" : job.printerName)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let error = job.errorMessage, !error.isEmpty {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer()
+
+            Button("重试", action: onRetry)
+                .buttonStyle(.borderedProminent)
+                .disabled(job.pdfPath.isEmpty)
+        }
+        .padding(12)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -473,6 +523,8 @@ struct PrintQueueWorkspace: View {
                     .onTapGesture { dismissPanels() }
 
                 QueueErrorDrawer(job: errorJob) {
+                    model.retry(job: errorJob)
+                } close: {
                     dismissPanels()
                 }
                 .frame(width: 420)
@@ -1231,6 +1283,7 @@ struct QueuePrimaryButtonStyle: ButtonStyle {
 
 struct QueueErrorDrawer: View {
     let job: QueueJob
+    let onRetry: () -> Void
     let close: () -> Void
 
     var body: some View {
@@ -1297,9 +1350,12 @@ struct QueueErrorDrawer: View {
                     .buttonStyle(QueuePlainButtonStyle())
                     .frame(maxWidth: .infinity)
 
-                Button("重试打印", action: close)
-                    .buttonStyle(QueuePrimaryButtonStyle())
-                    .frame(maxWidth: .infinity)
+                Button("重试打印") {
+                    onRetry()
+                    close()
+                }
+                .buttonStyle(QueuePrimaryButtonStyle())
+                .frame(maxWidth: .infinity)
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 16)
@@ -1467,21 +1523,6 @@ struct ProtocolEmptyListView: View {
         }
         .foregroundStyle(QueueDesign.borderMid)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-struct PayloadDocumentsCard: View {
-    let tasks: [RecentTask]
-
-    var body: some View {
-        SettingsCard(title: "支持范围", subtitle: "当前可处理的面单能力。") {
-            VStack(alignment: .leading, spacing: 9) {
-                DedupKeyRow("一次提交里的多张面单")
-                DedupKeyRow("多张面单逐个生成预览")
-                DedupKeyRow("最近文档数：\(tasks.first?.documentCountText ?? "0")")
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
     }
 }
 
