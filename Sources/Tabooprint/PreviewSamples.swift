@@ -179,7 +179,10 @@ enum PreviewSamples {
             documentCount: 1,
             mode: "physical-dry-run",
             result: "physical-dry-run",
-            isInProgress: false
+            isInProgress: false,
+            documents: [
+                QueueDocument(waybillCode: "78812340001122", receiverName: "演示收件人 甲", receiverPhone: "188****8801", province: "浙江省", city: "杭州市", district: "余杭区")
+            ]
         ),
         RecentTask(
             id: "preview-submitted",
@@ -189,7 +192,11 @@ enum PreviewSamples {
             documentCount: 2,
             mode: "physical-print",
             result: "physical-print",
-            isInProgress: false
+            isInProgress: false,
+            documents: [
+                QueueDocument(waybillCode: "78812340002233", receiverName: "演示收件人 乙", receiverPhone: "188****8802", province: "江苏省", city: "南京市", district: "鼓楼区"),
+                QueueDocument(waybillCode: "78812340002244", receiverName: "演示收件人 丙", receiverPhone: "188****8803", province: "广东省", city: "深圳市", district: "南山区"),
+            ]
         ),
     ]
 
@@ -235,7 +242,10 @@ enum PreviewSamples {
             pdfPath: "/Users/amo/cainiao-x-print/preview/DEMO_0001.pdf",
             status: .dryRun,
             errorMessage: nil,
-            commandText: "lpr -P 'TAOBAO' -o media=100x180mm -o fit-to-page"
+            commandText: "lpr -P 'TAOBAO' -o media=100x180mm -o fit-to-page",
+            documents: [
+                QueueDocument(waybillCode: "79013939670143", receiverName: "演示收件人 丁", receiverPhone: "188****8804", province: "四川省", city: "成都市", district: "武侯区")
+            ]
         ),
         PrintJob(
             id: "job-submitted",

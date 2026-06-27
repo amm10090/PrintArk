@@ -78,6 +78,93 @@ final class TabooprintTests: XCTestCase {
         XCTAssertEqual(jobs[1].status, .done)
     }
 
+    func testQueueJobExpandsMultiDocumentTaskIntoMultipleCards() {
+        let task = RecentTask(
+            id: "RID-MULTI",
+            timestampText: "2026-06-27 09:00:00",
+            command: "print",
+            requestID: "RID-MULTI",
+            documentCount: 2,
+            mode: "default-preview",
+            result: "preview",
+            isInProgress: false,
+            documents: [
+                QueueDocument(waybillCode: "WB-001", receiverName: "张三", receiverPhone: "13800000001", province: "浙江省", city: "杭州市", district: "西湖区"),
+                QueueDocument(waybillCode: "WB-002", receiverName: "李四", receiverPhone: "13800000002", province: "江苏省", city: "苏州市", district: "姑苏区"),
+            ]
+        )
+
+        let jobs = QueueJob.merged(printJobs: [], recentTasks: [task])
+
+        XCTAssertEqual(jobs.count, 2)
+        XCTAssertEqual(jobs.map(\.id), ["RID-MULTI#0", "RID-MULTI#1"])
+        // 标题用真实运单号，不是 requestID。
+        XCTAssertEqual(jobs[0].waybillCode, "WB-001")
+        XCTAssertEqual(jobs[1].waybillCode, "WB-002")
+        // 收件人不脱敏，电话原样保留。
+        XCTAssertEqual(jobs[0].receiverName, "张三")
+        XCTAssertEqual(jobs[0].receiverPhone, "13800000001")
+        // 地区为省+市+区拼接。
+        XCTAssertEqual(jobs[0].regionText, "浙江省杭州市西湖区")
+        XCTAssertEqual(jobs[1].regionText, "江苏省苏州市姑苏区")
+    }
+
+    func testQueueJobFallsBackToPlaceholderWhenNoDocuments() {
+        let task = RecentTask(
+            id: "RID-LEGACY",
+            timestampText: "2026-06-27 09:05:00",
+            command: "print",
+            requestID: "RID-LEGACY",
+            documentCount: 3,
+            mode: "default-preview",
+            result: "preview",
+            isInProgress: false
+        )
+
+        let jobs = QueueJob.merged(printJobs: [], recentTasks: [task])
+
+        XCTAssertEqual(jobs.count, 1)
+        XCTAssertEqual(jobs[0].id, "RID-LEGACY")
+        // 旧事件日志无 documents → 回退占位卡，标题用 requestID，收件人脱敏占位。
+        XCTAssertEqual(jobs[0].waybillCode, "RID-LEGACY")
+        XCTAssertEqual(jobs[0].receiverName, "收件人已脱敏")
+        XCTAssertTrue(jobs[0].regionText.isEmpty)
+    }
+
+    func testParseRecentTasksReadsDocumentsArray() {
+        let event = #"[cainiao-mock:event] {"type":"task","phase":"finish","requestID":"RID-DOC","taskID":"TASK-DOC","command":"print","documentCount":2,"mode":"default-preview","result":"preview","documents":[{"waybillCode":"YT001","receiverName":"王五","province":"广东省","city":"广州市","district":"天河区"},{"waybillCode":"YT002","receiverName":"赵六","province":"北京市","city":"北京市","district":"朝阳区"}]}"#
+
+        let tasks = NativePrintService.parseRecentTasks(from: [event])
+
+        XCTAssertEqual(tasks.count, 1)
+        XCTAssertEqual(tasks[0].documents.count, 2)
+        XCTAssertEqual(tasks[0].documents[0].waybillCode, "YT001")
+        XCTAssertEqual(tasks[0].documents[0].receiverName, "王五")
+        XCTAssertEqual(tasks[0].documents[0].regionText, "广东省广州市天河区")
+        // 电话不落盘：日志事件不含 phone，parse 出的电话为空。
+        XCTAssertEqual(tasks[0].documents[0].receiverPhone, "")
+        XCTAssertEqual(tasks[0].documents[1].waybillCode, "YT002")
+    }
+
+    func testParsePrintJobsReadsDocumentsArray() {
+        let event = #"[cainiao-mock:event] {"type":"print-job","phase":"dry-run","requestID":"RID-PJ","taskID":"TASK-PJ","printer":"TAOBAO","documentCount":1,"pdfPath":"/tmp/x.pdf","commandText":"lpr","documents":[{"waybillCode":"SF999","receiverName":"钱七","province":"四川省","city":"成都市","district":"高新区"}]}"#
+
+        let jobs = NativePrintService.parsePrintJobs(from: [event], fallbackPrinter: "TAOBAO")
+
+        XCTAssertEqual(jobs.count, 1)
+        XCTAssertEqual(jobs[0].documents.count, 1)
+        XCTAssertEqual(jobs[0].documents[0].waybillCode, "SF999")
+        XCTAssertEqual(jobs[0].documents[0].regionText, "四川省成都市高新区")
+        XCTAssertEqual(jobs[0].documents[0].receiverPhone, "")
+    }
+
+    func testEventLogDoesNotContainReceiverPhone() {
+        let event = #"[cainiao-mock:event] {"type":"task","phase":"finish","requestID":"RID-NOPHONE","documents":[{"waybillCode":"YT001","receiverName":"王五","province":"广东省","city":"广州市","district":"天河区"}]}"#
+        // 合规：结构化事件日志不得含电话字段。
+        XCTAssertFalse(event.contains("receiverPhone"))
+        XCTAssertFalse(event.contains("phone"))
+    }
+
     func testPrintSettingsDefaultToDryRun() {
         let settings = PrintSettings(
             printerName: "TAOBAO",

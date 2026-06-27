@@ -73,6 +73,11 @@ final class NativePrintService: @unchecked Sendable {
     private var logLines: [String] = []
     private var renderedPDFs: [String: URL] = [:]
     private var physicalPrintHistory: [String: PhysicalPrintHistoryItem] = [:]
+    /// 真实电话内存缓存（key = `requestID#docIndex`）。合规约定：电话不落盘到事件日志，
+    /// 仅进此进程内存缓存，由 snapshot() 在锁内按 key 注入到各 QueueDocument.receiverPhone。
+    private var receiverPhoneCache: [String: String] = [:]
+    /// receiverPhoneCache 的 requestID 插入顺序，用于 FIFO 淘汰，避免长时间运行内存只增不减。
+    private var receiverPhoneCacheOrder: [String] = []
     private var lastRenderContext: (payload: [String: JSONValue], requestID: String, taskID: String)?
     private var lastError = ""
     private let renderer = NativeWaybillRenderer()
@@ -257,6 +262,23 @@ final class NativePrintService: @unchecked Sendable {
         ]
         let tasks = Self.parseRecentTasks(from: lines)
         let jobs = Self.parsePrintJobs(from: lines, fallbackPrinter: config.printSettings.printerName)
+        // 电话不落盘，故 parse 出的 documents 不含电话；在此从内存缓存按 requestID#index 注入。
+        let tasksWithPhones = lock.withLock {
+            tasks.map { task -> RecentTask in
+                guard !task.documents.isEmpty else { return task }
+                var task = task
+                task.documents = injectPhones(into: task.documents, requestID: task.requestID)
+                return task
+            }
+        }
+        let jobsWithPhones = lock.withLock {
+            jobs.map { job -> PrintJob in
+                guard !job.documents.isEmpty else { return job }
+                var job = job
+                job.documents = injectPhones(into: job.documents, requestID: job.id)
+                return job
+            }
+        }
         let state: ServiceState = running ? .running : (error.isEmpty ? .stopped : .error)
         let portSummary = ports.map { "\($0.label)\($0.stateText)" }.joined(separator: " · ")
         let connectionText = connections == 1 ? "1 个浏览器连接" : "\(connections) 个浏览器连接"
@@ -266,8 +288,8 @@ final class NativePrintService: @unchecked Sendable {
             serviceSummary: summary,
             ports: ports,
             activeBrowserConnections: connections,
-            recentTasks: tasks,
-            printJobs: jobs,
+            recentTasks: tasksWithPhones,
+            printJobs: jobsWithPhones,
             printerDevices: discoverPrinterDevices(defaultPrinterName: config.printSettings.printerName),
             rawLogLines: lines,
             latestPreviewPDF: latestPreviewPDF,
@@ -397,6 +419,41 @@ final class NativePrintService: @unchecked Sendable {
         appendLog("http \(method) \(path) -> \(status.code) bytes=\(byteCount)")
     }
 
+    /// 把每个文档的真实电话写入进程内存缓存（key=`requestID#docIndex`），受 lock 保护。
+    /// 合规约定：电话只进内存、绝不进事件日志。按 requestID FIFO 淘汰，避免内存只增不减。
+    private func cacheReceiverPhones(requestID: String, infos: [ExtractedDocumentInfo]) {
+        lock.withLock {
+            var wrote = false
+            for (index, info) in infos.enumerated() where !info.receiverPhone.isEmpty {
+                receiverPhoneCache["\(requestID)#\(index)"] = info.receiverPhone
+                wrote = true
+            }
+            guard wrote else { return }
+            receiverPhoneCacheOrder.removeAll { $0 == requestID }
+            receiverPhoneCacheOrder.append(requestID)
+            // 队列只展示最近若干任务（prefix 20），保留 50 个 requestID 余量充足。
+            let maxRequestIDs = 50
+            while receiverPhoneCacheOrder.count > maxRequestIDs {
+                let stale = receiverPhoneCacheOrder.removeFirst()
+                for key in receiverPhoneCache.keys where key.hasPrefix("\(stale)#") {
+                    receiverPhoneCache.removeValue(forKey: key)
+                }
+            }
+        }
+    }
+
+    /// 锁内按 key 注入电话到一组 documents。仅在 snapshot() 内调用（已持锁）。
+    private func injectPhones(into documents: [QueueDocument], requestID: String) -> [QueueDocument] {
+        guard !documents.isEmpty else { return documents }
+        return documents.enumerated().map { index, doc in
+            var doc = doc
+            if let phone = receiverPhoneCache["\(requestID)#\(index)"] {
+                doc.receiverPhone = phone
+            }
+            return doc
+        }
+    }
+
     private var isRunning: Bool {
         lock.withLock { runtime != nil }
     }
@@ -409,6 +466,20 @@ final class NativePrintService: @unchecked Sendable {
         let documents = task.array("documents").compactMap(\.objectValue)
         let runtimeMode = describeRuntimeMode(config)
 
+        // 解密每个文档，提取真实展示字段。电话写进程内存缓存（不落盘），
+        // 其余字段（运单号/收件人/省市区）随事件日志 documents 数组携带。
+        let extracted = documents.map { renderer.extractDocumentInfo($0) }
+        cacheReceiverPhones(requestID: requestID, infos: extracted)
+        let documentsJSON: JSONValue = .array(extracted.map { info in
+            .object([
+                "waybillCode": .string(info.waybillCode),
+                "receiverName": .string(info.receiverName),
+                "province": .string(info.province),
+                "city": .string(info.city),
+                "district": .string(info.district),
+            ])
+        })
+
         emit("task", [
             "phase": .string("start"),
             "command": .string("print"),
@@ -417,6 +488,7 @@ final class NativePrintService: @unchecked Sendable {
             "printer": .string(printer),
             "documentCount": .number(Double(documents.count)),
             "mode": .string(runtimeMode),
+            "documents": documentsJSON,
         ])
 
         if documents.isEmpty || config.failureMode == "document-not-found" {
@@ -537,7 +609,7 @@ final class NativePrintService: @unchecked Sendable {
                 }
             }
         } else if physicalMode {
-            let job = submitPhysicalPrint(requestID: requestID, taskID: taskID, taskPrinter: printer, docs: docs, pdfURL: renderResult.url, config: config)
+            let job = submitPhysicalPrint(requestID: requestID, taskID: taskID, taskPrinter: printer, docs: docs, pdfURL: renderResult.url, config: config, documentsJSON: documentsJSON)
             physicalPrintJob = job
             flow.append((130, job.ok
                 ? buildNotifyPrintResult(requestID: requestID, taskID: taskID, printer: job.printerName, docs: docs, spendTime: spendTime)
@@ -580,6 +652,7 @@ final class NativePrintService: @unchecked Sendable {
             "mode": .string(runtimeMode),
             "result": .string(describeTaskResult(shouldReturnPreview: shouldReturnPreview, physicalPrintJob: physicalPrintJob)),
             "renderedPdf": .string(renderResult.url.path),
+            "documents": documentsJSON,
         ]
         if shouldReturnPreview {
             fields["previewURL"] = .string(previewURL)
@@ -658,7 +731,7 @@ final class NativePrintService: @unchecked Sendable {
         }
     }
 
-    private func submitPhysicalPrint(requestID: String, taskID: String, taskPrinter: String, docs: [ProtocolDocument], pdfURL: URL, config: PrintServiceConfiguration) -> PhysicalPrintJob {
+    private func submitPhysicalPrint(requestID: String, taskID: String, taskPrinter: String, docs: [ProtocolDocument], pdfURL: URL, config: PrintServiceConfiguration, documentsJSON: JSONValue) -> PhysicalPrintJob {
         let resolved = config.printSettings.printerName.isEmpty ? taskPrinter : config.printSettings.printerName
         // 兜底：清洗可能被旧版解析器写入 UserDefaults 的脏名（如「TAOBAO闲置」），避免 lpr -P 找不到目标。
         let printerName = sanitizePrinterName(resolved)
@@ -684,6 +757,7 @@ final class NativePrintService: @unchecked Sendable {
                 "previousCommandText": .string(duplicate.commandText),
                 "duplicateAgeMs": .number(Double(Int(Date().timeIntervalSince1970 * 1000) - duplicate.timestampMs)),
                 "dedupeKey": .string(dedupeKey),
+                "documents": documentsJSON,
             ])
             return PhysicalPrintJob(
                 ok: true,
@@ -706,6 +780,7 @@ final class NativePrintService: @unchecked Sendable {
             "pdfPath": .string(pdfURL.path),
             "commandText": .string(commandText),
             "media": .string(config.printSettings.media),
+            "documents": documentsJSON,
         ])
 
         if config.printSettings.dryRun {
@@ -743,6 +818,7 @@ final class NativePrintService: @unchecked Sendable {
                 "documentCount": .number(Double(docs.count)),
                 "pdfPath": .string(pdfURL.path),
                 "commandText": .string(commandText),
+                "documents": documentsJSON,
             ])
             rememberPhysicalPrint(dedupeKey, item: PhysicalPrintHistoryItem(
                 timestampMs: Int(Date().timeIntervalSince1970 * 1000),
@@ -765,6 +841,7 @@ final class NativePrintService: @unchecked Sendable {
                 "pdfPath": .string(pdfURL.path),
                 "commandText": .string(commandText),
                 "error": .string(error.localizedDescription),
+                "documents": documentsJSON,
             ])
             return PhysicalPrintJob(ok: false, dryRun: false, duplicate: false, printerName: printerName, commandText: commandText, pdfURL: pdfURL, error: error.localizedDescription)
         }
@@ -930,6 +1007,16 @@ struct ProtocolDocument: Sendable {
     let documentId: String
     let fingerprint: String
     let index: Int
+}
+
+/// 从单个文档解密提取出的真实展示字段（卡片用）。phone 由调用方决定是否落盘。
+struct ExtractedDocumentInfo: Sendable {
+    let waybillCode: String
+    let receiverName: String
+    let receiverPhone: String
+    let province: String
+    let city: String
+    let district: String
 }
 
 private struct PhysicalPrintJob: Sendable {
@@ -1138,6 +1225,31 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             return [:]
         }
     }
+
+    /// 解密单个文档并提取卡片所需的真实展示字段（运单号 / 收件人 / 电话 / 省市区）。
+    /// 复用 splitContents + decryptWaybillContent 的解密路径；运单号取解密内容的
+    /// waybillCode（回退 custom 区条码 / documentID），地区取解密 JSON 的 recipient.address。
+    func extractDocumentInfo(_ document: [String: JSONValue]) -> ExtractedDocumentInfo {
+        let parts = splitContents(document)
+        let decrypted = decryptWaybillContent(parts.standard)
+        let customData = parts.custom.object("data")
+        let recipient = decrypted.object("recipient")
+        let address = recipient.object("address")
+        let waybillCode = firstNonEmpty([
+            decrypted.string("waybillCode"),
+            customData.string("WAIBILLNO_BAR_CODE"),
+            document.string("documentID", default: document.string("documentId")),
+        ])
+        return ExtractedDocumentInfo(
+            waybillCode: waybillCode,
+            receiverName: recipient.string("name"),
+            receiverPhone: firstNonEmpty([recipient.string("mobile"), recipient.string("phone")]),
+            province: address.string("province"),
+            city: address.string("city"),
+            district: address.string("district")
+        )
+    }
+
 
     private func drawCainiao300336(
         pageRect: CGRect,
@@ -1881,6 +1993,10 @@ extension NativePrintService {
             task.documentCount = Int(Double(event["documentCount"]?.stringValue ?? "\(task.documentCount)") ?? Double(task.documentCount))
             task.mode = event.string("mode", default: task.mode)
             task.result = event.string("result", default: task.result)
+            let parsedDocs = decodeDocuments(from: event)
+            if !parsedDocs.isEmpty {
+                task.documents = parsedDocs
+            }
             if phase == "finish" {
                 task.isInProgress = false
             } else if phase == "start" {
@@ -1925,7 +2041,8 @@ extension NativePrintService {
                 pdfPath: event.string("pdfPath", default: event.string("previousPdfPath")),
                 status: status,
                 errorMessage: error.isEmpty ? duplicateMessage : error,
-                commandText: event.string("commandText", default: event.string("previousCommandText"))
+                commandText: event.string("commandText", default: event.string("previousCommandText")),
+                documents: decodeDocuments(from: event)
             ), event.string("time"))
         }
         return jobs.values.sorted {
@@ -1938,6 +2055,20 @@ extension NativePrintService {
         let prefix = "[cainiao-mock:event] "
         guard line.hasPrefix(prefix) else { return nil }
         return try? JSONValue.parse(String(line.dropFirst(prefix.count))).objectValue
+    }
+
+    /// 从事件的 documents 数组解析出 QueueDocument（电话留空，由 snapshot() 注入）。
+    /// 缺失字段时返回空数组，下游回退占位卡。
+    private static func decodeDocuments(from event: [String: JSONValue]) -> [QueueDocument] {
+        event.array("documents").compactMap(\.objectValue).map { doc in
+            QueueDocument(
+                waybillCode: doc.string("waybillCode"),
+                receiverName: doc.string("receiverName"),
+                province: doc.string("province"),
+                city: doc.string("city"),
+                district: doc.string("district")
+            )
+        }
     }
 }
 

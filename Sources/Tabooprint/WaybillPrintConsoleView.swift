@@ -261,6 +261,7 @@ struct QueueJob: Identifiable, Equatable {
     let receiverName: String
     let receiverPhone: String
     let receiverAddress: String
+    let regionText: String
     let copies: Int
     let status: QueueJobStatus
     let progress: Double
@@ -545,25 +546,22 @@ struct PrintQueueWorkspace: View {
 extension QueueJob {
     static func merged(printJobs: [PrintJob], recentTasks: [RecentTask]) -> [QueueJob] {
         let requestIDsWithPrintJobs = Set(printJobs.map(\.id))
-        let liveJobs = printJobs.enumerated().map { index, job in
+        let liveJobs = printJobs.enumerated().flatMap { index, job in
             QueueJob.from(printJob: job, index: index)
         }
         let previewJobs = recentTasks
             .filter { task in
                 !requestIDsWithPrintJobs.contains(task.requestID) && task.shouldAppearInQueue
             }
-            .map { task in
+            .flatMap { task in
                 QueueJob.from(recentTask: task)
             }
         return liveJobs + previewJobs
     }
 
-    static func from(printJob: PrintJob, index: Int) -> QueueJob {
-        let useDesignSample = printJob.usesDesignSampleRecipient
-        let sample = useDesignSample
-            ? QueueJob.sampleDetails[index % QueueJob.sampleDetails.count]
-            : QueueJob.genericDetails
-        let copies = useDesignSample ? max(1, (index % 4) + 1) : 1
+    /// 文档级展开：documents 非空时每张运单一张卡（id=`taskID#index`），承载真实数据；
+    /// 为空时回退到单张占位卡（沿用示例/脱敏占位）。
+    static func from(printJob: PrintJob, index: Int) -> [QueueJob] {
         let status = printJob.status.queueStatus
         let progress: Double
         switch status {
@@ -574,12 +572,41 @@ extension QueueJob {
         case .queued, .failed:
             progress = 0
         }
-        return QueueJob(
+
+        if !printJob.documents.isEmpty {
+            return printJob.documents.enumerated().map { docIndex, doc in
+                QueueJob(
+                    id: "\(printJob.id)#\(docIndex)",
+                    waybillCode: doc.waybillCode.isEmpty ? printJob.waybillCode : doc.waybillCode,
+                    receiverName: doc.receiverName.isEmpty ? "—" : doc.receiverName,
+                    receiverPhone: doc.receiverPhone,
+                    receiverAddress: doc.regionText.isEmpty ? "—" : doc.regionText,
+                    regionText: doc.regionText,
+                    copies: 1,
+                    status: status,
+                    progress: progress,
+                    createdAtText: "—",
+                    printerName: printJob.printerName,
+                    pdfPath: printJob.pdfPath,
+                    errorMessage: printJob.errorMessage,
+                    commandText: printJob.commandText,
+                    kind: printJob.queueKind
+                )
+            }
+        }
+
+        let useDesignSample = printJob.usesDesignSampleRecipient
+        let sample = useDesignSample
+            ? QueueJob.sampleDetails[index % QueueJob.sampleDetails.count]
+            : QueueJob.genericDetails
+        let copies = useDesignSample ? max(1, (index % 4) + 1) : 1
+        return [QueueJob(
             id: printJob.id,
             waybillCode: printJob.waybillCode,
             receiverName: sample.name,
             receiverPhone: sample.phone,
             receiverAddress: sample.address,
+            regionText: sample.region,
             copies: copies,
             status: status,
             progress: progress,
@@ -589,17 +616,40 @@ extension QueueJob {
             errorMessage: printJob.errorMessage,
             commandText: printJob.commandText,
             kind: printJob.queueKind
-        )
+        )]
     }
 
-    static func from(recentTask: RecentTask) -> QueueJob {
+    static func from(recentTask: RecentTask) -> [QueueJob] {
+        if !recentTask.documents.isEmpty {
+            return recentTask.documents.enumerated().map { docIndex, doc in
+                QueueJob(
+                    id: "\(recentTask.requestID)#\(docIndex)",
+                    waybillCode: doc.waybillCode.isEmpty ? recentTask.requestID : doc.waybillCode,
+                    receiverName: doc.receiverName.isEmpty ? "—" : doc.receiverName,
+                    receiverPhone: doc.receiverPhone,
+                    receiverAddress: doc.regionText.isEmpty ? "—" : doc.regionText,
+                    regionText: doc.regionText,
+                    copies: 1,
+                    status: recentTask.queueStatus,
+                    progress: recentTask.isInProgress ? 0.36 : 1,
+                    createdAtText: recentTask.timestampText,
+                    printerName: recentTask.queueSourceText,
+                    pdfPath: "",
+                    errorMessage: recentTask.queueErrorMessage,
+                    commandText: "requestID=\(recentTask.requestID) · 第 \(docIndex + 1)/\(recentTask.documents.count) 张",
+                    kind: recentTask.queueKind
+                )
+            }
+        }
+
         let sample = QueueJob.genericDetails
-        return QueueJob(
+        return [QueueJob(
             id: recentTask.requestID,
             waybillCode: recentTask.requestID,
             receiverName: sample.name,
             receiverPhone: sample.phone,
             receiverAddress: sample.address,
+            regionText: sample.region,
             copies: max(1, recentTask.documentCount),
             status: recentTask.queueStatus,
             progress: recentTask.isInProgress ? 0.36 : 1,
@@ -609,28 +659,29 @@ extension QueueJob {
             errorMessage: recentTask.queueErrorMessage,
             commandText: "requestID=\(recentTask.requestID) · \(recentTask.documentCountText) 个文档",
             kind: recentTask.queueKind
-        )
+        )]
     }
 
-    fileprivate static let sampleDetails: [(name: String, phone: String, address: String, time: String)] = [
-        ("演示收件人 01", "188****0001", "示例省示例市示例区演示路 1 号", "14:32"),
-        ("演示收件人 02", "188****0002", "示例省示例市示例区演示路 2 号", "14:28"),
-        ("演示收件人 03", "188****0003", "示例省示例市示例区演示路 3 号", "14:21"),
-        ("演示收件人 04", "188****0004", "示例省示例市示例区演示路 4 号", "14:18"),
-        ("演示收件人 05", "188****0005", "示例省示例市示例区演示路 5 号", "14:15"),
-        ("演示收件人 06", "188****0006", "示例省示例市示例区演示路 6 号", "14:09"),
-        ("演示收件人 07", "188****0007", "示例省示例市示例区演示路 7 号", "14:05"),
-        ("演示收件人 08", "188****0008", "示例省示例市示例区演示路 8 号", "14:01"),
-        ("演示收件人 09", "188****0009", "示例省示例市示例区演示路 9 号", "13:58"),
-        ("演示收件人 10", "188****0010", "示例省示例市示例区演示路 10 号", "13:52"),
-        ("演示收件人 11", "188****0011", "示例省示例市示例区演示路 11 号", "13:47"),
-        ("演示收件人 12", "188****0012", "示例省示例市示例区演示路 12 号", "13:41"),
+    fileprivate static let sampleDetails: [(name: String, phone: String, address: String, region: String, time: String)] = [
+        ("演示收件人 01", "188****0001", "示例省示例市示例区演示路 1 号", "示例省示例市示例区", "14:32"),
+        ("演示收件人 02", "188****0002", "示例省示例市示例区演示路 2 号", "示例省示例市示例区", "14:28"),
+        ("演示收件人 03", "188****0003", "示例省示例市示例区演示路 3 号", "示例省示例市示例区", "14:21"),
+        ("演示收件人 04", "188****0004", "示例省示例市示例区演示路 4 号", "示例省示例市示例区", "14:18"),
+        ("演示收件人 05", "188****0005", "示例省示例市示例区演示路 5 号", "示例省示例市示例区", "14:15"),
+        ("演示收件人 06", "188****0006", "示例省示例市示例区演示路 6 号", "示例省示例市示例区", "14:09"),
+        ("演示收件人 07", "188****0007", "示例省示例市示例区演示路 7 号", "示例省示例市示例区", "14:05"),
+        ("演示收件人 08", "188****0008", "示例省示例市示例区演示路 8 号", "示例省示例市示例区", "14:01"),
+        ("演示收件人 09", "188****0009", "示例省示例市示例区演示路 9 号", "示例省示例市示例区", "13:58"),
+        ("演示收件人 10", "188****0010", "示例省示例市示例区演示路 10 号", "示例省示例市示例区", "13:52"),
+        ("演示收件人 11", "188****0011", "示例省示例市示例区演示路 11 号", "示例省示例市示例区", "13:47"),
+        ("演示收件人 12", "188****0012", "示例省示例市示例区演示路 12 号", "示例省示例市示例区", "13:41"),
     ]
 
-    private static let genericDetails: (name: String, phone: String, address: String, time: String) = (
+    private static let genericDetails: (name: String, phone: String, address: String, region: String, time: String) = (
         "收件人已脱敏",
         "—",
         "真实收件地址请以 PDF 预览为准",
+        "",
         "—"
     )
 }
@@ -827,17 +878,18 @@ struct QueueListPanel: View {
     let toggleSelection: (QueueJob) -> Void
     let showError: (QueueJob) -> Void
 
+    /// 自适应多列网格：每列至少 300pt，随窗口宽度自动决定列数。
+    private let columns = [GridItem(.adaptive(minimum: 300, maximum: 460), spacing: 14)]
+
     var body: some View {
         VStack(spacing: 0) {
-            QueueHeaderRow()
-
             if jobs.isEmpty {
                 QueueEmptyListView()
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 2) {
+                    LazyVGrid(columns: columns, spacing: 14) {
                         ForEach(jobs) { job in
-                            QueueJobRow(
+                            QueueJobCard(
                                 job: job,
                                 isSelected: selectedJobID == job.id,
                                 isChecked: selectedIDs.contains(job.id),
@@ -847,8 +899,8 @@ struct QueueListPanel: View {
                             )
                         }
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
                 }
             }
         }
@@ -861,39 +913,7 @@ struct QueueListPanel: View {
     }
 }
 
-struct QueueHeaderRow: View {
-    var body: some View {
-        Grid(alignment: .center, horizontalSpacing: 0, verticalSpacing: 0) {
-            GridRow {
-                QueueCheckbox(isOn: false)
-                    .padding(.leading, 16)
-                    .frame(width: 54, alignment: .leading)
-
-                Text("任务详情")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                Text("份数")
-                    .frame(width: 64, alignment: .trailing)
-
-                Text("创建时间")
-                    .frame(width: 92, alignment: .trailing)
-                    .padding(.trailing, 16)
-            }
-        }
-        .font(.system(size: 11, weight: .semibold))
-        .foregroundStyle(QueueDesign.neutral)
-        .textCase(.uppercase)
-        .frame(height: 44)
-        .background(QueueDesign.canvas)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(QueueDesign.borderSoft)
-                .frame(height: 0.5)
-        }
-    }
-}
-
-struct QueueJobRow: View {
+struct QueueJobCard: View {
     let job: QueueJob
     let isSelected: Bool
     let isChecked: Bool
@@ -901,78 +921,94 @@ struct QueueJobRow: View {
     let toggleSelection: () -> Void
     let showError: () -> Void
 
+    private var receiverLine: String {
+        if job.receiverPhone.isEmpty {
+            return job.receiverName
+        }
+        return "\(job.receiverName) · \(job.receiverPhone)"
+    }
+
     var body: some View {
-        Grid(alignment: .center, horizontalSpacing: 0, verticalSpacing: 0) {
-            GridRow {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 8) {
                 Button(action: toggleSelection) {
                     QueueCheckbox(isOn: isChecked)
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, 8)
-                .frame(width: 54, alignment: .leading)
 
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 8) {
-                        Text(job.waybillCode)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(QueueDesign.ink)
-                            .fontDesign(.default)
-                            .lineLimit(1)
-
-                        QueueKindBadge(kind: job.kind)
-                        QueueStatusBadge(status: job.status)
-                    }
-
-                    HStack(spacing: 4) {
-                        Text(job.receiverName)
-                            .foregroundStyle(QueueDesign.neutral)
-
-                        if job.status == .failed {
-                            Text("·")
-                                .foregroundStyle(QueueDesign.neutral)
-                            Button(action: showError) {
-                                Text("查看错误详情")
-                                    .foregroundStyle(QueueDesign.danger)
-                                    .underline()
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .font(.system(size: 12.5))
+                Text(job.waybillCode)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(QueueDesign.ink)
                     .lineLimit(1)
-
-                    if job.status == .printing {
-                        ProgressView(value: job.progress)
-                            .progressViewStyle(.linear)
-                            .tint(QueueDesign.accent)
-                            .frame(height: 3)
-                            .padding(.top, 8)
-                            .padding(.trailing, 8)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 Text("\(job.copies) 份")
-                    .font(.system(size: 13))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(QueueDesign.ink2)
-                    .frame(width: 64, alignment: .trailing)
+            }
 
+            HStack(spacing: 6) {
+                QueueKindBadge(kind: job.kind)
+                QueueStatusBadge(status: job.status)
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Label {
+                    Text(receiverLine)
+                        .lineLimit(1)
+                } icon: {
+                    Image(systemName: "person")
+                }
+
+                if !job.regionText.isEmpty {
+                    Label {
+                        Text(job.regionText)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    } icon: {
+                        Image(systemName: "mappin.and.ellipse")
+                    }
+                }
+            }
+            .font(.system(size: 12.5))
+            .foregroundStyle(QueueDesign.neutral)
+
+            if job.status == .printing {
+                ProgressView(value: job.progress)
+                    .progressViewStyle(.linear)
+                    .tint(QueueDesign.accent)
+                    .frame(height: 3)
+            }
+
+            HStack(spacing: 8) {
                 Text(job.createdAtText)
-                    .font(.system(size: 11.5))
+                    .font(.system(size: 11))
                     .foregroundStyle(QueueDesign.neutral)
                     .monospacedDigit()
-                    .frame(width: 92, alignment: .trailing)
-                    .padding(.trailing, 8)
+
+                Spacer(minLength: 0)
+
+                if job.status == .failed {
+                    Button(action: showError) {
+                        Text("查看错误详情")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(QueueDesign.danger)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
-        .padding(.vertical, 12)
-        .background(isSelected ? QueueDesign.white : Color.clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(QueueDesign.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(isSelected ? QueueDesign.borderSoft : Color.clear, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isSelected ? QueueDesign.accent : QueueDesign.borderSoft, lineWidth: isSelected ? 1.5 : 0.5)
         }
-        .shadow(color: isSelected ? .black.opacity(0.08) : .clear, radius: 12, x: 0, y: 7)
-        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .shadow(color: .black.opacity(isSelected ? 0.10 : 0.05), radius: isSelected ? 12 : 6, x: 0, y: isSelected ? 6 : 3)
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onTapGesture(perform: selectJob)
         .accessibilityAddTraits(.isButton)
     }

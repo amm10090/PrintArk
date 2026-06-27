@@ -194,6 +194,36 @@ struct WaybillDocument: Identifiable {
     var printedAt: Date
 }
 
+/// 单个文档（一张运单）的真实展示数据。卡片按文档粒度展开，每张卡消费一个 QueueDocument。
+/// 合规约定：waybillCode / receiverName / 省市区写进结构化事件日志（可重启恢复）；
+/// receiverPhone 不落盘，仅在 snapshot() 从进程内存缓存按 key 注入。
+struct QueueDocument: Equatable {
+    let waybillCode: String
+    let receiverName: String
+    var receiverPhone: String
+    let province: String
+    let city: String
+    let district: String
+
+    init(
+        waybillCode: String,
+        receiverName: String,
+        receiverPhone: String = "",
+        province: String,
+        city: String,
+        district: String
+    ) {
+        self.waybillCode = waybillCode
+        self.receiverName = receiverName
+        self.receiverPhone = receiverPhone
+        self.province = province
+        self.city = city
+        self.district = district
+    }
+
+    var regionText: String { province + city + district }
+}
+
 struct PrintJob: Identifiable {
     let id: String
     let waybillCode: String
@@ -202,6 +232,8 @@ struct PrintJob: Identifiable {
     let status: PrintJobStatus
     let errorMessage: String?
     let commandText: String?
+    /// 文档级真实数据（运单号/收件人/地区）。无真实数据（旧日志/示例）时为空，下游回退占位。
+    var documents: [QueueDocument] = []
 }
 
 extension WaybillDocument {

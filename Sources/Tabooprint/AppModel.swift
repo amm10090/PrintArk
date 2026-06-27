@@ -103,6 +103,8 @@ struct RecentTask: Identifiable {
     var mode: String
     var result: String
     var isInProgress: Bool
+    /// 文档级真实数据（运单号/收件人/地区）。无真实数据时为空，下游回退占位。
+    var documents: [QueueDocument] = []
 
     var modeDisplay: String {
         switch mode {
