@@ -13,7 +13,58 @@ enum SettingsKeys {
     static let dedupeWindowMinutes = "tabooprint.dedupeWindowMinutes"
     static let printHideTaoLogo = "tabooprint.printHideTaoLogo"
     static let printHideCourierPackage = "tabooprint.printHideCourierPackage"
+    static let printHideBorder = "tabooprint.printHideBorder"
     static let printFlip = "tabooprint.printFlip"
+    static let printerCalibrations = "tabooprint.printerCalibrations"
+    static let fontSizeItemInfoMM = "tabooprint.fontSizeItemInfoMM"
+    static let fontSizeMemoMM = "tabooprint.fontSizeMemoMM"
+}
+
+/// App 版本号单一数据源。版本页与日志引用此常量；
+/// build 脚本的 Info.plist（CFBundleShortVersionString）需人工对齐同一字面。
+/// 注意：协议伪装字段（getAgentInfo 的 "1.5.3.0"）不是 App 版本，与此无关。
+enum AppInfo {
+    static let version = "1.0.0"
+
+    /// 构建日期（本地化短日期）。以可执行文件的修改时间作为编译期代理——
+    /// `.app` 包与 `swift run` 都能取到，无需编译期注入宏。
+    static let buildDate: String = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let path = Bundle.main.executablePath
+            ?? CommandLine.arguments.first
+        if let path,
+           let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+           let date = attrs[.modificationDate] as? Date {
+            return formatter.string(from: date)
+        }
+        return formatter.string(from: Date())
+    }()
+}
+
+/// 出厂默认设置（集中注册）。仅对从未被显式写入的扁平键生效——
+/// 已有用户的已选值（更高优先级 domain）原样保留，满足「仅新装生效」。
+/// 校准类（offset/rotation/scale/adaptivePaper）按打印机存于 printerCalibrations JSON，
+/// register(defaults:) 覆盖不到，由 PrinterCalibration.factoryDefault 兜底。
+///
+/// 一致性约束：此表的默认值必须与各 `@AppStorage(...) = X` 字面值、
+/// 以及 `PrintSettings.current` 的 `?? 默认` 完全一致，否则两套默认值漂移。
+enum FactoryDefaults {
+    static func register() {
+        let values: [String: Any] = [
+            SettingsKeys.printMedia: "74x126mm",
+            SettingsKeys.printFitToPage: true,
+            SettingsKeys.printDedupe: false,
+            SettingsKeys.printFlip: true,
+            SettingsKeys.printHideTaoLogo: true,
+            SettingsKeys.printHideCourierPackage: true,
+            SettingsKeys.printHideBorder: true,
+            SettingsKeys.fontSizeItemInfoMM: 3.5,
+            SettingsKeys.fontSizeMemoMM: 5.5,
+            SettingsKeys.debugPreview: false,
+        ]
+        UserDefaults.standard.register(defaults: values)
+    }
 }
 
 enum RuntimeMode: String, CaseIterable, Identifiable {
@@ -101,6 +152,8 @@ struct RecentTask: Identifiable {
     var mode: String
     var result: String
     var isInProgress: Bool
+    /// 文档级真实数据（运单号/收件人/地区）。无真实数据时为空，下游回退占位。
+    var documents: [QueueDocument] = []
 
     var modeDisplay: String {
         switch mode {
@@ -161,19 +214,37 @@ struct PrintSettings {
     var dedupeWindowMinutes: Int
     var hideTaoLogo: Bool = false
     var hideCourierPackage: Bool = false
+    var hideBorder: Bool = false
     var flipPrint: Bool = false
+    // 面单字段字号（mm），全局偏好，预览与物理打印同源生效。
+    var itemInfoFontMM: Double = 3.2
+    var memoFontMM: Double = 2.5
+    // 按打印机校准（由 resolvedPrintSettings() 从 AppModel.printerCalibrations 注入，不读扁平键）。
+    var offsetXMM: Double = 0
+    var offsetYMM: Double = 0
+    var rotationDegrees: Int = 0
+    var scaleRatio: Double = 1.0
+    var adaptivePaper: Bool = false
+
+    /// 渲染用的校准视图，从已注入的字段聚合。
+    var calibration: PrinterCalibration {
+        PrinterCalibration(offsetXMM: offsetXMM, offsetYMM: offsetYMM, rotationDegrees: rotationDegrees, scaleRatio: scaleRatio, adaptivePaper: adaptivePaper)
+    }
 
     static var current: PrintSettings {
         let defaults = UserDefaults.standard
         let printerName = defaults.string(forKey: SettingsKeys.printerName) ?? "TAOBAO"
-        let media = defaults.string(forKey: SettingsKeys.printMedia) ?? "100x180mm"
+        let media = defaults.string(forKey: SettingsKeys.printMedia) ?? "74x126mm"
         let dryRun = defaults.object(forKey: SettingsKeys.printDryRun) as? Bool ?? true
         let fitToPage = defaults.object(forKey: SettingsKeys.printFitToPage) as? Bool ?? true
-        let dedupe = defaults.object(forKey: SettingsKeys.printDedupe) as? Bool ?? true
+        let dedupe = defaults.object(forKey: SettingsKeys.printDedupe) as? Bool ?? false
         let dedupeWindowMinutes = defaults.object(forKey: SettingsKeys.dedupeWindowMinutes) as? Int ?? 10
-        let hideTaoLogo = defaults.object(forKey: SettingsKeys.printHideTaoLogo) as? Bool ?? false
-        let hideCourierPackage = defaults.object(forKey: SettingsKeys.printHideCourierPackage) as? Bool ?? false
-        let flipPrint = defaults.object(forKey: SettingsKeys.printFlip) as? Bool ?? false
+        let hideTaoLogo = defaults.object(forKey: SettingsKeys.printHideTaoLogo) as? Bool ?? true
+        let hideCourierPackage = defaults.object(forKey: SettingsKeys.printHideCourierPackage) as? Bool ?? true
+        let hideBorder = defaults.object(forKey: SettingsKeys.printHideBorder) as? Bool ?? true
+        let flipPrint = defaults.object(forKey: SettingsKeys.printFlip) as? Bool ?? true
+        let itemInfoFontMM = defaults.object(forKey: SettingsKeys.fontSizeItemInfoMM) as? Double ?? 3.5
+        let memoFontMM = defaults.object(forKey: SettingsKeys.fontSizeMemoMM) as? Double ?? 5.5
         return PrintSettings(
             printerName: printerName.isEmpty ? "TAOBAO" : printerName,
             media: media,
@@ -183,7 +254,10 @@ struct PrintSettings {
             dedupeWindowMinutes: dedupeWindowMinutes,
             hideTaoLogo: hideTaoLogo,
             hideCourierPackage: hideCourierPackage,
-            flipPrint: flipPrint
+            hideBorder: hideBorder,
+            flipPrint: flipPrint,
+            itemInfoFontMM: itemInfoFontMM,
+            memoFontMM: memoFontMM
         )
     }
 }
@@ -201,6 +275,15 @@ final class AppModel: NSObject, ObservableObject {
     @Published var latestPreviewPDF: URL?
     @Published var lastActionOutput: String = ""
     @Published var lastRefreshedText: String = "从未刷新"
+
+    /// 按打印机名持久化的校准设置。整张表以 JSON 存于单个 UserDefaults 键，
+    /// 因为 @AppStorage 无法按打印机名动态建键。
+    @Published var printerCalibrations: [String: PrinterCalibration] = AppModel.loadCalibrations()
+
+    /// 当前预览 PDF 里**已烘焙**的校准值。预览层叠加「当前校准 − bakedCalibration」的
+    /// 增量变换实现实时平滑预览；每当 latestPreviewPDF 的 URL 变化（web 端打单或内容类
+    /// 重渲染），同步为当前打印机校准，使增量归零、切换无跳变。
+    @Published var bakedCalibration: PrinterCalibration = .identity
 
     private let printService = NativePrintService()
     private var pollingTimer: Timer?
@@ -245,16 +328,81 @@ final class AppModel: NSObject, ObservableObject {
         launchService(action: .restart)
     }
 
+    /// 失败任务重试：复用已渲染并落盘的 PDF 重新执行 lpr，绕过 10 分钟去重，沿用当前 dryRun 设置。
+    /// Process 在后台执行避免阻塞主线程，结果回主线程写 lastActionOutput 并刷新快照。
+    func retry(job: QueueJob) {
+        retry(requestID: job.id, pdfPath: job.pdfPath, printerName: job.printerName, waybillCode: job.waybillCode)
+    }
+
+    /// 失败列表（侧边栏「失败重试」页）用 PrintJob 触发重试的入口。
+    func retry(job: PrintJob) {
+        retry(requestID: job.id, pdfPath: job.pdfPath, printerName: job.printerName, waybillCode: job.waybillCode)
+    }
+
+    private func retry(requestID: String, pdfPath: String, printerName: String, waybillCode: String) {
+        guard !pdfPath.isEmpty else {
+            lastActionOutput = "重试失败：任务 \(waybillCode) 缺少 PDF 路径"
+            return
+        }
+        lastActionOutput = "正在重试：\(waybillCode)…"
+        let service = printService
+        Task.detached {
+            let job = service.retryPhysicalPrint(requestID: requestID, pdfPath: pdfPath, printerName: printerName)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if job.ok {
+                    self.lastActionOutput = job.dryRun
+                        ? "已重试（模拟）：\(waybillCode) · \(job.printerName)"
+                        : "已重试打印：\(waybillCode) · \(job.printerName)"
+                } else {
+                    self.lastActionOutput = "重试失败：\(waybillCode) · \(job.error ?? "未知错误")"
+                }
+                self.refresh()
+            }
+        }
+    }
+
     /// 当前生效的打印设置：以 debugPreview 为唯一来源翻译 dryRun，
     /// 避免读到无人写入的历史 `printDryRun` 键（恒为 true）而把真实打印误降级为模拟。
     private func resolvedPrintSettings() -> PrintSettings {
         var settings = PrintSettings.current
         settings.dryRun = UserDefaults.standard.bool(forKey: SettingsKeys.debugPreview)
+        // 注入当前选中打印机的校准；服务端消费这些具体值（不再按名二次查表）。
+        // 无记录打印机回退到出厂默认（自适应纸张开），而非纯零基线 identity。
+        let cal = printerCalibrations[settings.printerName] ?? .factoryDefault
+        settings.offsetXMM = cal.offsetXMM
+        settings.offsetYMM = cal.offsetYMM
+        settings.rotationDegrees = cal.rotationDegrees
+        settings.scaleRatio = cal.scaleRatio
+        settings.adaptivePaper = cal.adaptivePaper
         return settings
     }
 
-    /// 立即应用当前打印设置，并在可能时重渲染最近一张真实面单预览。
+    /// 从 UserDefaults 解码校准表；缺失或损坏时回退到空表。
+    private static func loadCalibrations() -> [String: PrinterCalibration] {
+        guard let data = UserDefaults.standard.data(forKey: SettingsKeys.printerCalibrations),
+              let decoded = try? JSONDecoder().decode([String: PrinterCalibration].self, from: data) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    /// 将当前校准表编码写回 UserDefaults。
+    func saveCalibrations() {
+        guard let data = try? JSONEncoder().encode(printerCalibrations) else { return }
+        UserDefaults.standard.set(data, forKey: SettingsKeys.printerCalibrations)
+    }
+
+    /// 应用当前打印设置。预览的实时变化由 `printerCalibrations`（@Published）驱动的
+    /// 增量变换层负责，像素级精确且无需重绘 PDF —— 因此纯校准变化**不重渲染预览**，
+    /// 只把设置推给服务供下次打印使用，彻底消除每次步进都闪屏的问题。
     func applyPrintSettings() {
+        printService.updateConfiguration(resolvedPrintSettings())
+    }
+
+    /// 立即按当前设置重烘焙最近一张面单并刷新快照。
+    /// 用于内容类变化（隐藏标记、纸张、打印机切换）等确实需要重绘 PDF 的场景。
+    func rebakePreviewNow() {
         let didRerender = printService.applyPrintSettings(resolvedPrintSettings())
         apply(snapshot: printService.snapshot())
         if didRerender {
@@ -320,7 +468,13 @@ final class AppModel: NSObject, ObservableObject {
         recentTasks = Array(snapshot.recentTasks.prefix(20))
         printJobs = Array(snapshot.printJobs.prefix(12))
         printerDevices = snapshot.printerDevices
+        // 预览 PDF 的 URL 变化意味着烘焙了新内容（web 端打单或自身防抖重烘焙），
+        // 此时其中烘焙的校准就是当前打印机校准——同步 bakedCalibration 令增量变换归零。
+        let previousPreview = latestPreviewPDF
         latestPreviewPDF = snapshot.latestPreviewPDF
+        if let url = snapshot.latestPreviewPDF, url != previousPreview {
+            bakedCalibration = printerCalibrations[PrintSettings.current.printerName] ?? .identity
+        }
         lastRawLogLineCount = snapshot.rawLogLines.count
 
         let startIndex = min(logViewerLineBaseline, snapshot.rawLogLines.count)

@@ -4,12 +4,13 @@ struct PrintPipelineInspector: View {
     @ObservedObject var model: AppModel
 
     @AppStorage(SettingsKeys.printerName) private var printerName = "TAOBAO"
-    @AppStorage(SettingsKeys.printMedia) private var printMedia = "100x180mm"
+    @AppStorage(SettingsKeys.printMedia) private var printMedia = "74x126mm"
     @AppStorage(SettingsKeys.printFitToPage) private var fitToPage = true
-    @AppStorage(SettingsKeys.printDedupe) private var duplicateProtection = true
+    @AppStorage(SettingsKeys.printDedupe) private var duplicateProtection = false
     @AppStorage(SettingsKeys.dedupeWindowMinutes) private var duplicateWindowMinutes = 10
-    @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = false
-    @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = false
+    @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = true
+    @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = true
+    @AppStorage(SettingsKeys.printHideBorder) private var hideBorder = true
 
     private var printers: [PrinterDevice] {
         var devices = model.printerDevices
@@ -38,16 +39,18 @@ struct PrintPipelineInspector: View {
                     duplicateWindowMinutes: $duplicateWindowMinutes,
                     printers: printers
                 )
+                .onChange(of: printerName) { _ in model.rebakePreviewNow() }
+
+                PrinterCalibrationCard(model: model, printerName: printerName)
 
                 LabelContentCard(
                     model: model,
                     hideTaoLogo: $hideTaoLogo,
-                    hideCourierPackage: $hideCourierPackage
+                    hideCourierPackage: $hideCourierPackage,
+                    hideBorder: $hideBorder
                 )
 
-                RecentJobsCard(jobs: model.printJobs)
-
-                FutureBatchCard()
+                RecentJobsCard(jobs: model.queueJobs)
             }
             .frame(maxWidth: .infinity)
             .padding(18)
@@ -129,18 +132,138 @@ struct LabelContentCard: View {
     @ObservedObject var model: AppModel
     @Binding var hideTaoLogo: Bool
     @Binding var hideCourierPackage: Bool
+    @Binding var hideBorder: Bool
+
+    @AppStorage(SettingsKeys.fontSizeItemInfoMM) private var itemInfoFontMM = 3.5
+    @AppStorage(SettingsKeys.fontSizeMemoMM) private var memoFontMM = 5.5
 
     var body: some View {
         SettingsCard(title: "面单内容", subtitle: "选择是否打印这些标记。") {
             VStack(alignment: .leading, spacing: 12) {
                 Toggle("不打印左上角的“淘”字", isOn: $hideTaoLogo)
-                    .onChange(of: hideTaoLogo) { _ in model.applyPrintSettings() }
+                    .onChange(of: hideTaoLogo) { _ in model.rebakePreviewNow() }
 
                 Toggle("不打印右上角的“快递包裹”", isOn: $hideCourierPackage)
-                    .onChange(of: hideCourierPackage) { _ in model.applyPrintSettings() }
+                    .onChange(of: hideCourierPackage) { _ in model.rebakePreviewNow() }
+
+                Toggle("不打印面单外边框", isOn: $hideBorder)
+                    .onChange(of: hideBorder) { _ in model.rebakePreviewNow() }
+
+                Stepper("商品信息字号：\(itemInfoFontMM, specifier: "%.1f") mm",
+                        value: $itemInfoFontMM, in: 2.0...10.0, step: 0.1)
+                    .onChange(of: itemInfoFontMM) { _ in model.rebakePreviewNow() }
+
+                Stepper("卖家/买家备注字号：\(memoFontMM, specifier: "%.1f") mm",
+                        value: $memoFontMM, in: 1.5...10.0, step: 0.1)
+                    .onChange(of: memoFontMM) { _ in model.rebakePreviewNow() }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// 按打印机的校准设置卡片。通过指向 model.printerCalibrations、按当前 printerName
+/// 取值的计算 Binding 读写——切换打印机 Picker 时控件自动显示该机器的值。
+struct PrinterCalibrationCard: View {
+    @ObservedObject var model: AppModel
+    let printerName: String
+
+    @AppStorage(SettingsKeys.printFlip) private var flipPrint = true
+
+    private static let rotationOptions = [0, 90, 180, 270, 360]
+
+    private var calibration: Binding<PrinterCalibration> {
+        Binding(
+            get: { model.printerCalibrations[printerName] ?? .factoryDefault },
+            set: {
+                model.printerCalibrations[printerName] = $0
+                model.saveCalibrations()
+                model.applyPrintSettings()
+            }
+        )
+    }
+
+    private var rotationWarning: Bool {
+        let rot = calibration.wrappedValue.rotationDegrees % 360
+        return (rot == 90 || rot == 270) && !calibration.wrappedValue.adaptivePaper
+    }
+
+    var body: some View {
+        SettingsCard(title: "打印机校准", subtitle: "为「\(printerName)」单独保存偏移、旋转、缩放与自适应纸张。") {
+            VStack(alignment: .leading, spacing: 14) {
+                Stepper(
+                    "水平偏移：\(mmText(calibration.wrappedValue.offsetXMM)) mm（+ 向右）",
+                    value: calibration.offsetXMM,
+                    in: -50...50,
+                    step: 0.5
+                )
+
+                Stepper(
+                    "垂直偏移：\(mmText(calibration.wrappedValue.offsetYMM)) mm（+ 向下）",
+                    value: calibration.offsetYMM,
+                    in: -50...50,
+                    step: 0.5
+                )
+
+                Picker("旋转角度", selection: calibration.rotationDegrees) {
+                    ForEach(Self.rotationOptions, id: \.self) { degree in
+                        Text("\(degree)°").tag(degree)
+                    }
+                }
+
+                Stepper(
+                    "缩放比例：\(scaleText(calibration.wrappedValue.scaleRatio))×",
+                    value: calibration.scaleRatio,
+                    in: 0.25...4.0,
+                    step: 0.05
+                )
+
+                Toggle("自适应纸张（按内容尺寸自动选纸）", isOn: calibration.adaptivePaper)
+
+                Divider()
+
+                Toggle("反转打印（纸张180°反向放置时使用）", isOn: $flipPrint)
+                    .onChange(of: flipPrint) { _ in model.applyPrintSettings() }
+
+                Text("仅作用于真实打印，预览不反转。用于快递面单纸反方向放置时，避免信息从纸张底部开始打印。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if rotationWarning {
+                    CalibrationHint(text: "90° / 270° 旋转在非自适应纸张下可能裁切内容，建议开启自适应纸张。", color: .orange)
+                }
+
+                if calibration.wrappedValue.rotationDegrees % 360 == 180 && flipPrint {
+                    CalibrationHint(text: "校准旋转 180° 与「反转打印」会在纸面相互抵消（预览仍显示 180°）。", color: .secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func mmText(_ value: Double) -> String {
+        String(format: "%.1f", value)
+    }
+
+    private func scaleText(_ value: Double) -> String {
+        String(format: "%.2f", value)
+    }
+}
+
+struct CalibrationHint: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(color)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -165,16 +288,16 @@ struct DedupKeyRow: View {
 }
 
 struct RecentJobsCard: View {
-    let jobs: [PrintJob]
+    let jobs: [QueueJob]
 
     var body: some View {
-        SettingsCard(title: "最近任务", subtitle: "查看每次打印的文件和结果。") {
+        SettingsCard(title: "最近任务", subtitle: "查看每次打印和预览任务的文件和结果。") {
             if jobs.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("等待打印任务", systemImage: "tray")
                         .font(.subheadline.weight(.semibold))
 
-                    Text("从千牛提交后，这里会显示打印的文件和结果。")
+                    Text("从千牛提交后，这里会显示打印和预览的文件、状态与结果。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -191,7 +314,7 @@ struct RecentJobsCard: View {
 }
 
 struct RecentJobRow: View {
-    let job: PrintJob
+    let job: QueueJob
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -203,16 +326,16 @@ struct RecentJobRow: View {
                     Text(job.printerName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
 
                 Spacer()
 
-                Label(job.status.rawValue, systemImage: job.status.systemImage)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(job.status.color)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(job.status.color.opacity(0.12), in: Capsule())
+                VStack(alignment: .trailing, spacing: 6) {
+                    QueueKindBadge(kind: job.kind)
+                    QueueStatusBadge(status: job.status)
+                }
             }
 
             if !job.pdfPath.isEmpty {
@@ -240,44 +363,6 @@ struct RecentJobRow: View {
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-}
-
-struct FutureBatchCard: View {
-    var body: some View {
-        SettingsCard(title: "后续批量能力", subtitle: "当前可处理一次提交里的多张面单；批量导入将在后续版本提供。") {
-            VStack(alignment: .leading, spacing: 10) {
-                FutureRow(title: "CSV / Excel 导入", detail: "后续解析为多张面单")
-                FutureRow(title: "字段映射", detail: "后续映射运单号、地址、备注等字段")
-                FutureRow(title: "批量预览", detail: "一次提交里的多张面单当前可进入预览")
-                FutureRow(title: "批量打印", detail: "后续支持一次性打印多个面单")
-                FutureRow(title: "失败重试", detail: "后续对失败任务单独重试")
-            }
-        }
-    }
-}
-
-struct FutureRow: View {
-    let title: String
-    let detail: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "circle.dashed")
-                .foregroundStyle(.secondary)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-        }
     }
 }
 
@@ -358,8 +443,65 @@ struct PrinterStatusBadge: View {
 @MainActor
 struct PrintPipelineInspector_Previews: PreviewProvider {
     static var previews: some View {
-        PrintPipelineInspector(model: PreviewSamples.consoleModel)
-            .frame(width: 390, height: 760)
+        Group {
+            ForEach([
+                PreviewModelState.running,
+                .stoppedEmpty,
+                .error,
+                .busyQueue,
+                .calibrated,
+            ]) { state in
+                PrintPipelineInspector(model: PreviewSamples.model(state))
+                    .frame(width: 390, height: 760)
+                    .defaultAppStorage(PreviewSamples.previewDefaults)
+                    .previewDisplayName("设置面板 · \(state.title)")
+            }
+        }
+    }
+}
+
+@MainActor
+struct PrintSettingsCards_Previews: PreviewProvider {
+    static var previews: some View {
+        Group {
+            RecentJobsCard(jobs: [])
+                .padding(24)
+                .frame(width: 420)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("最近任务 · 空")
+
+            RecentJobsCard(jobs: PreviewSamples.model(.busyQueue).queueJobs)
+                .padding(24)
+                .frame(width: 420)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("最近任务 · 多状态")
+
+            RecentJobRow(job: PreviewSamples.model(.error).queueJobs.first(where: { $0.kind == .failure }) ?? PreviewSamples.model(.error).queueJobs[0])
+                .padding(24)
+                .frame(width: 420)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("任务行 · 失败")
+
+            PipelineSettingsCard(
+                selectedPrinter: PreviewSamples.unavailablePrinters[0],
+                printerName: .constant("TAOBAO"),
+                printMedia: .constant("A4"),
+                fitToPage: .constant(true),
+                duplicateProtection: .constant(false),
+                duplicateWindowMinutes: .constant(10),
+                printers: PreviewSamples.unavailablePrinters
+            )
+            .padding(24)
+            .frame(width: 420)
+            .defaultAppStorage(PreviewSamples.previewDefaults)
+            .previewDisplayName("打印设置 · 不可用打印机")
+
+            PrinterCalibrationCard(model: PreviewSamples.model(.calibrated), printerName: "TAOBAO")
+                .padding(24)
+                .frame(width: 420)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("打印机校准 · 警告")
+        }
     }
 }
 #endif

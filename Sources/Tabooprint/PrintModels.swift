@@ -16,6 +16,36 @@ enum WaybillContentBox {
     static let heightMM: CGFloat = 126
 }
 
+/// 单台打印机的校准设置：mm 偏移、旋转角度、缩放、自适应纸张。
+/// 按打印机名分别持久化（见 AppModel.printerCalibrations），切换打印机时自动加载。
+struct PrinterCalibration: Codable, Equatable {
+    /// 水平偏移（mm，+ 向右）。
+    var offsetXMM: Double = 0
+    /// 垂直偏移（mm，+ 向下，页面方向）。
+    var offsetYMM: Double = 0
+    /// 旋转角度，预设 0/90/180/270/360。
+    var rotationDegrees: Int = 0
+    /// 缩放比例，默认 1.0。
+    var scaleRatio: Double = 1.0
+    /// 自适应纸张：开启后按内容足迹自动选纸，而非手选纸张尺寸。
+    var adaptivePaper: Bool = false
+
+    static let identity = PrinterCalibration()
+
+    /// 出厂默认校准：偏移/旋转/缩放保持基线（与 identity 相同），仅自适应纸张默认开启。
+    /// 用于「某打印机尚无校准记录」时的初始回退值；不替换 identity 的增量预览基线语义。
+    static let factoryDefault = PrinterCalibration(adaptivePaper: true)
+}
+
+/// 自适应纸张时的内容足迹尺寸（mm）：74×126 内容盒经旋转交换长短边、再乘缩放。
+/// 渲染 mediaBox、lpr media 字符串、dedupe key 三处共用，确保一致。
+func adaptiveFootprintMM(rotationDegrees: Int, scaleRatio: Double) -> (w: Double, h: Double) {
+    let swap = (rotationDegrees % 180 == 90)
+    let w = (swap ? WaybillContentBox.heightMM : WaybillContentBox.widthMM) * CGFloat(scaleRatio)
+    let h = (swap ? WaybillContentBox.widthMM : WaybillContentBox.heightMM) * CGFloat(scaleRatio)
+    return (Double(w), Double(h))
+}
+
 /// 纸张/面单尺寸的单一数据源。UI 选择、预览外框、PDF mediaBox 均从这里取值。
 struct PaperSize: Identifiable, Hashable {
     enum Group: String, CaseIterable, Identifiable {
@@ -168,6 +198,36 @@ struct WaybillDocument: Identifiable {
     var printedAt: Date
 }
 
+/// 单个文档（一张运单）的真实展示数据。卡片按文档粒度展开，每张卡消费一个 QueueDocument。
+/// 合规约定：waybillCode / receiverName / 省市区写进结构化事件日志（可重启恢复）；
+/// receiverPhone 不落盘，仅在 snapshot() 从进程内存缓存按 key 注入。
+struct QueueDocument: Equatable {
+    let waybillCode: String
+    let receiverName: String
+    var receiverPhone: String
+    let province: String
+    let city: String
+    let district: String
+
+    init(
+        waybillCode: String,
+        receiverName: String,
+        receiverPhone: String = "",
+        province: String,
+        city: String,
+        district: String
+    ) {
+        self.waybillCode = waybillCode
+        self.receiverName = receiverName
+        self.receiverPhone = receiverPhone
+        self.province = province
+        self.city = city
+        self.district = district
+    }
+
+    var regionText: String { province + city + district }
+}
+
 struct PrintJob: Identifiable {
     let id: String
     let waybillCode: String
@@ -176,6 +236,8 @@ struct PrintJob: Identifiable {
     let status: PrintJobStatus
     let errorMessage: String?
     let commandText: String?
+    /// 文档级真实数据（运单号/收件人/地区）。无真实数据（旧日志/示例）时为空，下游回退占位。
+    var documents: [QueueDocument] = []
 }
 
 extension WaybillDocument {

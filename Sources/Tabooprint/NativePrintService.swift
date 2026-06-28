@@ -73,6 +73,11 @@ final class NativePrintService: @unchecked Sendable {
     private var logLines: [String] = []
     private var renderedPDFs: [String: URL] = [:]
     private var physicalPrintHistory: [String: PhysicalPrintHistoryItem] = [:]
+    /// 真实电话内存缓存（key = `requestID#docIndex`）。合规约定：电话不落盘到事件日志，
+    /// 仅进此进程内存缓存，由 snapshot() 在锁内按 key 注入到各 QueueDocument.receiverPhone。
+    private var receiverPhoneCache: [String: String] = [:]
+    /// receiverPhoneCache 的 requestID 插入顺序，用于 FIFO 淘汰，避免长时间运行内存只增不减。
+    private var receiverPhoneCacheOrder: [String] = []
     private var lastRenderContext: (payload: [String: JSONValue], requestID: String, taskID: String)?
     private var lastError = ""
     private let renderer = NativeWaybillRenderer()
@@ -197,11 +202,10 @@ final class NativePrintService: @unchecked Sendable {
         return CommandResult(exitCode: startResult.exitCode, output: output)
     }
 
-    /// 应用最新的打印设置，并在已有渲染上下文时按新设置重渲染最近一张面单。
-    /// 返回是否实际重绘了预览。
-    @discardableResult
-    func applyPrintSettings(_ settings: PrintSettings) -> Bool {
-        let context = lock.withLock { () -> (payload: [String: JSONValue], requestID: String, taskID: String)? in
+    /// 仅更新服务配置（供下次打印使用），不重渲染预览。
+    /// 校准类变化由预览的增量变换层实时呈现，无需重绘 PDF，避免闪烁。
+    func updateConfiguration(_ settings: PrintSettings) {
+        lock.withLock {
             configuration = PrintServiceConfiguration(
                 host: configuration.host,
                 webSocketPort: configuration.webSocketPort,
@@ -210,8 +214,16 @@ final class NativePrintService: @unchecked Sendable {
                 autoOpenPreview: configuration.autoOpenPreview,
                 printSettings: settings
             )
-            return lastRenderContext
         }
+    }
+
+    /// 应用最新的打印设置，并在已有渲染上下文时按新设置重渲染最近一张面单。
+    /// 返回是否实际重绘了预览。内容类变化（隐藏标记、纸张、打印机）走此路径；
+    /// 纯校准变化应改用 `updateConfiguration` 以避免预览闪烁。
+    @discardableResult
+    func applyPrintSettings(_ settings: PrintSettings) -> Bool {
+        updateConfiguration(settings)
+        let context = lock.withLock { lastRenderContext }
         guard let context else { return false }
         let docs = context.payload.object("task").array("documents").compactMap(\.objectValue).enumerated().map { index, document in
             ProtocolDocument(
@@ -228,7 +240,11 @@ final class NativePrintService: @unchecked Sendable {
             docs: docs,
             paperSize: PaperCatalog.match(media: settings.media),
             hideTaoLogo: settings.hideTaoLogo,
-            hideCourierPackage: settings.hideCourierPackage
+            hideCourierPackage: settings.hideCourierPackage,
+            hideBorder: settings.hideBorder,
+            itemInfoFontMM: CGFloat(settings.itemInfoFontMM),
+            memoFontMM: CGFloat(settings.memoFontMM),
+            calibration: settings.calibration
         )
         return true
     }
@@ -248,6 +264,23 @@ final class NativePrintService: @unchecked Sendable {
         ]
         let tasks = Self.parseRecentTasks(from: lines)
         let jobs = Self.parsePrintJobs(from: lines, fallbackPrinter: config.printSettings.printerName)
+        // 电话不落盘，故 parse 出的 documents 不含电话；在此从内存缓存按 requestID#index 注入。
+        let tasksWithPhones = lock.withLock {
+            tasks.map { task -> RecentTask in
+                guard !task.documents.isEmpty else { return task }
+                var task = task
+                task.documents = injectPhones(into: task.documents, requestID: task.requestID)
+                return task
+            }
+        }
+        let jobsWithPhones = lock.withLock {
+            jobs.map { job -> PrintJob in
+                guard !job.documents.isEmpty else { return job }
+                var job = job
+                job.documents = injectPhones(into: job.documents, requestID: job.id)
+                return job
+            }
+        }
         let state: ServiceState = running ? .running : (error.isEmpty ? .stopped : .error)
         let portSummary = ports.map { "\($0.label)\($0.stateText)" }.joined(separator: " · ")
         let connectionText = connections == 1 ? "1 个浏览器连接" : "\(connections) 个浏览器连接"
@@ -257,8 +290,8 @@ final class NativePrintService: @unchecked Sendable {
             serviceSummary: summary,
             ports: ports,
             activeBrowserConnections: connections,
-            recentTasks: tasks,
-            printJobs: jobs,
+            recentTasks: tasksWithPhones,
+            printJobs: jobsWithPhones,
             printerDevices: discoverPrinterDevices(defaultPrinterName: config.printSettings.printerName),
             rawLogLines: lines,
             latestPreviewPDF: latestPreviewPDF,
@@ -388,6 +421,41 @@ final class NativePrintService: @unchecked Sendable {
         appendLog("http \(method) \(path) -> \(status.code) bytes=\(byteCount)")
     }
 
+    /// 把每个文档的真实电话写入进程内存缓存（key=`requestID#docIndex`），受 lock 保护。
+    /// 合规约定：电话只进内存、绝不进事件日志。按 requestID FIFO 淘汰，避免内存只增不减。
+    private func cacheReceiverPhones(requestID: String, infos: [ExtractedDocumentInfo]) {
+        lock.withLock {
+            var wrote = false
+            for (index, info) in infos.enumerated() where !info.receiverPhone.isEmpty {
+                receiverPhoneCache["\(requestID)#\(index)"] = info.receiverPhone
+                wrote = true
+            }
+            guard wrote else { return }
+            receiverPhoneCacheOrder.removeAll { $0 == requestID }
+            receiverPhoneCacheOrder.append(requestID)
+            // 队列只展示最近若干任务（prefix 20），保留 50 个 requestID 余量充足。
+            let maxRequestIDs = 50
+            while receiverPhoneCacheOrder.count > maxRequestIDs {
+                let stale = receiverPhoneCacheOrder.removeFirst()
+                for key in receiverPhoneCache.keys where key.hasPrefix("\(stale)#") {
+                    receiverPhoneCache.removeValue(forKey: key)
+                }
+            }
+        }
+    }
+
+    /// 锁内按 key 注入电话到一组 documents。仅在 snapshot() 内调用（已持锁）。
+    private func injectPhones(into documents: [QueueDocument], requestID: String) -> [QueueDocument] {
+        guard !documents.isEmpty else { return documents }
+        return documents.enumerated().map { index, doc in
+            var doc = doc
+            if let phone = receiverPhoneCache["\(requestID)#\(index)"] {
+                doc.receiverPhone = phone
+            }
+            return doc
+        }
+    }
+
     private var isRunning: Bool {
         lock.withLock { runtime != nil }
     }
@@ -400,6 +468,20 @@ final class NativePrintService: @unchecked Sendable {
         let documents = task.array("documents").compactMap(\.objectValue)
         let runtimeMode = describeRuntimeMode(config)
 
+        // 解密每个文档，提取真实展示字段。电话写进程内存缓存（不落盘），
+        // 其余字段（运单号/收件人/省市区）随事件日志 documents 数组携带。
+        let extracted = documents.map { renderer.extractDocumentInfo($0) }
+        cacheReceiverPhones(requestID: requestID, infos: extracted)
+        let documentsJSON: JSONValue = .array(extracted.map { info in
+            .object([
+                "waybillCode": .string(info.waybillCode),
+                "receiverName": .string(info.receiverName),
+                "province": .string(info.province),
+                "city": .string(info.city),
+                "district": .string(info.district),
+            ])
+        })
+
         emit("task", [
             "phase": .string("start"),
             "command": .string("print"),
@@ -408,6 +490,7 @@ final class NativePrintService: @unchecked Sendable {
             "printer": .string(printer),
             "documentCount": .number(Double(documents.count)),
             "mode": .string(runtimeMode),
+            "documents": documentsJSON,
         ])
 
         if documents.isEmpty || config.failureMode == "document-not-found" {
@@ -442,7 +525,7 @@ final class NativePrintService: @unchecked Sendable {
             "pending": .number(45),
             "rendering": .number(160),
         ]
-        let renderResult = renderWaybill(payload: payload, requestID: requestID, taskID: taskID, docs: docs, paperSize: PaperCatalog.match(media: config.printSettings.media), hideTaoLogo: config.printSettings.hideTaoLogo, hideCourierPackage: config.printSettings.hideCourierPackage)
+        let renderResult = renderWaybill(payload: payload, requestID: requestID, taskID: taskID, docs: docs, paperSize: PaperCatalog.match(media: config.printSettings.media), hideTaoLogo: config.printSettings.hideTaoLogo, hideCourierPackage: config.printSettings.hideCourierPackage, hideBorder: config.printSettings.hideBorder, itemInfoFontMM: CGFloat(config.printSettings.itemInfoFontMM), memoFontMM: CGFloat(config.printSettings.memoFontMM), calibration: config.printSettings.calibration)
         let previewURL = "http://localhost:\(config.httpPort)/file/\(renderResult.fileName)"
         var physicalPrintJob: PhysicalPrintJob?
 
@@ -528,7 +611,7 @@ final class NativePrintService: @unchecked Sendable {
                 }
             }
         } else if physicalMode {
-            let job = submitPhysicalPrint(requestID: requestID, taskID: taskID, taskPrinter: printer, docs: docs, pdfURL: renderResult.url, config: config)
+            let job = submitPhysicalPrint(requestID: requestID, taskID: taskID, taskPrinter: printer, docs: docs, pdfURL: renderResult.url, config: config, documentsJSON: documentsJSON)
             physicalPrintJob = job
             flow.append((130, job.ok
                 ? buildNotifyPrintResult(requestID: requestID, taskID: taskID, printer: job.printerName, docs: docs, spendTime: spendTime)
@@ -571,6 +654,7 @@ final class NativePrintService: @unchecked Sendable {
             "mode": .string(runtimeMode),
             "result": .string(describeTaskResult(shouldReturnPreview: shouldReturnPreview, physicalPrintJob: physicalPrintJob)),
             "renderedPdf": .string(renderResult.url.path),
+            "documents": documentsJSON,
         ]
         if shouldReturnPreview {
             fields["previewURL"] = .string(previewURL)
@@ -610,10 +694,17 @@ final class NativePrintService: @unchecked Sendable {
         channel.writeAndFlush(frame, promise: nil)
     }
 
-    private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument], paperSize: PaperSize, hideTaoLogo: Bool, hideCourierPackage: Bool) -> RenderResult {
+    private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument], paperSize: PaperSize, hideTaoLogo: Bool, hideCourierPackage: Bool, hideBorder: Bool, itemInfoFontMM: CGFloat, memoFontMM: CGFloat, calibration: PrinterCalibration) -> RenderResult {
         do {
-            let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage)
+            let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM, calibration: calibration)
             lock.withLock {
+                // 清理同一 taskID 的旧校准变体，避免反复调校准时缓存与磁盘膨胀。
+                let prefix = safeFilename(taskID)
+                for (name, url) in renderedPDFs where name != result.fileName
+                    && (name == "\(prefix).pdf" || name.hasPrefix("\(prefix)-cal")) {
+                    try? FileManager.default.removeItem(at: url)
+                    renderedPDFs.removeValue(forKey: name)
+                }
                 renderedPDFs[result.fileName] = result.url
                 lastRenderContext = (payload: payload, requestID: requestID, taskID: taskID)
             }
@@ -642,7 +733,7 @@ final class NativePrintService: @unchecked Sendable {
         }
     }
 
-    private func submitPhysicalPrint(requestID: String, taskID: String, taskPrinter: String, docs: [ProtocolDocument], pdfURL: URL, config: PrintServiceConfiguration) -> PhysicalPrintJob {
+    private func submitPhysicalPrint(requestID: String, taskID: String, taskPrinter: String, docs: [ProtocolDocument], pdfURL: URL, config: PrintServiceConfiguration, documentsJSON: JSONValue) -> PhysicalPrintJob {
         let resolved = config.printSettings.printerName.isEmpty ? taskPrinter : config.printSettings.printerName
         // 兜底：清洗可能被旧版解析器写入 UserDefaults 的脏名（如「TAOBAO闲置」），避免 lpr -P 找不到目标。
         let printerName = sanitizePrinterName(resolved)
@@ -668,6 +759,7 @@ final class NativePrintService: @unchecked Sendable {
                 "previousCommandText": .string(duplicate.commandText),
                 "duplicateAgeMs": .number(Double(Int(Date().timeIntervalSince1970 * 1000) - duplicate.timestampMs)),
                 "dedupeKey": .string(dedupeKey),
+                "documents": documentsJSON,
             ])
             return PhysicalPrintJob(
                 ok: true,
@@ -680,28 +772,63 @@ final class NativePrintService: @unchecked Sendable {
             )
         }
 
+        return runLpr(
+            requestID: requestID,
+            taskID: taskID,
+            printerName: printerName,
+            pdfURL: pdfURL,
+            lprArgs: lprArgs,
+            commandText: commandText,
+            docsCount: docs.count,
+            config: config,
+            documentsJSON: documentsJSON,
+            phasePrefix: "",
+            dedupeKey: dedupeKey
+        )
+    }
+
+    /// 执行 lpr 的核心块（emit 事件 + dryRun 分支 + Process 跑 /usr/bin/lpr + 记入去重历史 + 返回 PhysicalPrintJob）。
+    /// 从 `submitPhysicalPrint` 抽出以便正常打印与失败重试复用同一份执行逻辑。
+    /// - `phasePrefix`：正常打印传 ""，重试打印传 "retry-"，用于区分事件 phase 命名。
+    /// - `dedupeKey`：传 nil 时跳过 `rememberPhysicalPrint`（重试路径不写去重历史，避免无指纹脏键）。
+    private func runLpr(
+        requestID: String,
+        taskID: String,
+        printerName: String,
+        pdfURL: URL,
+        lprArgs: [String],
+        commandText: String,
+        docsCount: Int,
+        config: PrintServiceConfiguration,
+        documentsJSON: JSONValue,
+        phasePrefix: String,
+        dedupeKey: String?
+    ) -> PhysicalPrintJob {
         emit("print-job", [
-            "phase": .string(config.printSettings.dryRun ? "dry-run" : "submit"),
+            "phase": .string("\(phasePrefix)\(config.printSettings.dryRun ? "dry-run" : "submit")"),
             "command": .string("lpr"),
             "requestID": .string(requestID),
             "taskID": .string(taskID),
             "printer": .string(printerName),
-            "documentCount": .number(Double(docs.count)),
+            "documentCount": .number(Double(docsCount)),
             "pdfPath": .string(pdfURL.path),
             "commandText": .string(commandText),
             "media": .string(config.printSettings.media),
+            "documents": documentsJSON,
         ])
 
         if config.printSettings.dryRun {
-            rememberPhysicalPrint(dedupeKey, item: PhysicalPrintHistoryItem(
-                timestampMs: Int(Date().timeIntervalSince1970 * 1000),
-                requestID: requestID,
-                taskID: taskID,
-                printerName: printerName,
-                commandText: commandText,
-                pdfPath: pdfURL.path,
-                dryRun: true
-            ), settings: config.printSettings)
+            if let dedupeKey {
+                rememberPhysicalPrint(dedupeKey, item: PhysicalPrintHistoryItem(
+                    timestampMs: Int(Date().timeIntervalSince1970 * 1000),
+                    requestID: requestID,
+                    taskID: taskID,
+                    printerName: printerName,
+                    commandText: commandText,
+                    pdfPath: pdfURL.path,
+                    dryRun: true
+                ), settings: config.printSettings)
+            }
             return PhysicalPrintJob(ok: true, dryRun: true, duplicate: false, printerName: printerName, commandText: commandText, pdfURL: pdfURL, error: nil)
         }
 
@@ -719,39 +846,86 @@ final class NativePrintService: @unchecked Sendable {
                 throw NSError(domain: "Tabooprint", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr.isEmpty ? "lpr failed" : stderr])
             }
             emit("print-job", [
-                "phase": .string("submitted"),
+                "phase": .string("\(phasePrefix)submitted"),
                 "command": .string("lpr"),
                 "requestID": .string(requestID),
                 "taskID": .string(taskID),
                 "printer": .string(printerName),
-                "documentCount": .number(Double(docs.count)),
+                "documentCount": .number(Double(docsCount)),
                 "pdfPath": .string(pdfURL.path),
                 "commandText": .string(commandText),
+                "documents": documentsJSON,
             ])
-            rememberPhysicalPrint(dedupeKey, item: PhysicalPrintHistoryItem(
-                timestampMs: Int(Date().timeIntervalSince1970 * 1000),
-                requestID: requestID,
-                taskID: taskID,
-                printerName: printerName,
-                commandText: commandText,
-                pdfPath: pdfURL.path,
-                dryRun: false
-            ), settings: config.printSettings)
+            if let dedupeKey {
+                rememberPhysicalPrint(dedupeKey, item: PhysicalPrintHistoryItem(
+                    timestampMs: Int(Date().timeIntervalSince1970 * 1000),
+                    requestID: requestID,
+                    taskID: taskID,
+                    printerName: printerName,
+                    commandText: commandText,
+                    pdfPath: pdfURL.path,
+                    dryRun: false
+                ), settings: config.printSettings)
+            }
             return PhysicalPrintJob(ok: true, dryRun: false, duplicate: false, printerName: printerName, commandText: commandText, pdfURL: pdfURL, error: nil)
         } catch {
             emit("print-job", [
-                "phase": .string("failed"),
+                "phase": .string("\(phasePrefix)failed"),
                 "command": .string("lpr"),
                 "requestID": .string(requestID),
                 "taskID": .string(taskID),
                 "printer": .string(printerName),
-                "documentCount": .number(Double(docs.count)),
+                "documentCount": .number(Double(docsCount)),
                 "pdfPath": .string(pdfURL.path),
                 "commandText": .string(commandText),
                 "error": .string(error.localizedDescription),
+                "documents": documentsJSON,
             ])
             return PhysicalPrintJob(ok: false, dryRun: false, duplicate: false, printerName: printerName, commandText: commandText, pdfURL: pdfURL, error: error.localizedDescription)
         }
+    }
+
+    /// 失败任务重试：重打已渲染并落盘的 PDF，**绕过 10 分钟去重检查**（D2），沿用当前 dryRun 与打印设置。
+    /// 不重跑解密/渲染（D1）。`dedupeKey` 传 nil 让 `runLpr` 跳过 rememberPhysicalPrint —— 重试不写去重历史。
+    /// PDF 文件缺失时返回明确错误、不崩溃。
+    func retryPhysicalPrint(requestID: String, pdfPath: String, printerName: String) -> PhysicalPrintJob {
+        let config = lock.withLock { configuration }
+        // 打印机名优先用失败任务记录的值，为空时回退到当前配置/任务默认，并做脏名清洗。
+        let resolvedRaw = printerName.isEmpty ? config.printSettings.printerName : printerName
+        let resolvedName = sanitizePrinterName(resolvedRaw)
+
+        guard FileManager.default.fileExists(atPath: pdfPath) else {
+            let message = "重试失败：PDF 不存在（\(pdfPath)）"
+            emit("print-job", [
+                "phase": .string("retry-failed"),
+                "command": .string("lpr"),
+                "requestID": .string(requestID),
+                "printer": .string(resolvedName),
+                "pdfPath": .string(pdfPath),
+                "error": .string(message),
+            ])
+            return PhysicalPrintJob(ok: false, dryRun: config.printSettings.dryRun, duplicate: false, printerName: resolvedName, commandText: "", pdfURL: URL(fileURLWithPath: pdfPath), error: message)
+        }
+
+        let pdfURL = URL(fileURLWithPath: pdfPath)
+        // 沿用 flipPrint 旋转副本逻辑，与正常打印保持一致。
+        let printURL = config.printSettings.flipPrint ? makeRotatedPDFForPrinting(source: pdfURL) : pdfURL
+        let lprArgs = buildLprArgs(printerName: resolvedName, pdfURL: printURL, settings: config.printSettings)
+        let commandText = (["/usr/bin/lpr"] + lprArgs).map(shellDisplay(_:)).joined(separator: " ")
+
+        return runLpr(
+            requestID: requestID,
+            taskID: requestID,
+            printerName: resolvedName,
+            pdfURL: pdfURL,
+            lprArgs: lprArgs,
+            commandText: commandText,
+            docsCount: 0,
+            config: config,
+            documentsJSON: .array([]),
+            phasePrefix: "retry-",
+            dedupeKey: nil
+        )
     }
 
     /// 为物理打印生成一个 180° 旋转的 PDF 副本（PDF 标准 /Rotate，CUPS 栅格化必然遵守），
@@ -916,7 +1090,17 @@ struct ProtocolDocument: Sendable {
     let index: Int
 }
 
-private struct PhysicalPrintJob: Sendable {
+/// 从单个文档解密提取出的真实展示字段（卡片用）。phone 由调用方决定是否落盘。
+struct ExtractedDocumentInfo: Sendable {
+    let waybillCode: String
+    let receiverName: String
+    let receiverPhone: String
+    let province: String
+    let city: String
+    let district: String
+}
+
+struct PhysicalPrintJob: Sendable {
     let ok: Bool
     let dryRun: Bool
     let duplicate: Bool
@@ -941,9 +1125,11 @@ final class NativeWaybillRenderer: @unchecked Sendable {
     private let contentHeightMM: CGFloat = WaybillContentBox.heightMM
     private let mmToPoint: CGFloat = 72 / 25.4
 
-    func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String, paperSize: PaperSize = PaperCatalog.default, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false) throws -> RenderResult {
+    func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String, paperSize: PaperSize = PaperCatalog.default, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false, hideBorder: Bool = false, itemInfoFontMM: CGFloat = 3.2, memoFontMM: CGFloat = 2.5, calibration: PrinterCalibration = .identity) throws -> RenderResult {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        let fileName = "\(safeFilename(taskID)).pdf"
+        // 文件名随校准与字号变化，使重烘焙产出新 URL，PDFView/latestPreviewPDF 才会刷新；
+        // 均为默认值时保持纯 taskID 文件名（兼容既有断言与协议回放）。
+        let fileName = "\(safeFilename(taskID))\(Self.calibrationToken(calibration))\(Self.fontToken(itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM)).pdf"
         let outputURL = outputDirectory.appendingPathComponent(fileName)
         let task = payload.object("task")
         let documents = task.array("documents").compactMap(\.objectValue)
@@ -951,28 +1137,54 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             doc.string("documentID", default: doc.string("documentId", default: "MOCK_DOC_\(index + 1)"))
         }
 
-        // 外框 = 所选纸张尺寸（PDF mediaBox）。
-        var pageRect = CGRect(x: 0, y: 0, width: paperSize.widthMM * mmToPoint, height: paperSize.heightMM * mmToPoint)
-        // 内容盒固定 74×126mm，水平居中、垂直顶部对齐放入外框。
-        let contentRect = contentRect(in: pageRect, paperSize: paperSize)
+        // 外框 = 所选纸张尺寸（PDF mediaBox）；自适应时改用内容足迹。
+        var pageRect: CGRect
+        let contentRect: CGRect
+        if calibration.adaptivePaper {
+            let f = adaptiveFootprintMM(rotationDegrees: calibration.rotationDegrees, scaleRatio: calibration.scaleRatio)
+            pageRect = CGRect(x: 0, y: 0, width: f.w * mmToPoint, height: f.h * mmToPoint)
+            contentRect = centeredContentRect(in: pageRect)
+        } else {
+            pageRect = CGRect(x: 0, y: 0, width: paperSize.widthMM * mmToPoint, height: paperSize.heightMM * mmToPoint)
+            contentRect = self.contentRect(in: pageRect, paperSize: paperSize)
+        }
         guard let consumer = CGDataConsumer(url: outputURL as CFURL),
               let context = CGContext(consumer: consumer, mediaBox: &pageRect, nil) else {
             throw NSError(domain: "Tabooprint", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot create PDF"])
         }
 
         if documents.isEmpty {
-            drawPage(context: context, pageRect: pageRect, contentRect: contentRect) {
+            drawPage(context: context, pageRect: pageRect, contentRect: contentRect, calibration: calibration) {
                 drawText("Tabooprint 空任务", at: CGPoint(x: 18, y: 32), size: 16, weight: .bold)
                 drawText("requestID: \(requestID)", at: CGPoint(x: 18, y: 62), size: 8, weight: .regular)
                 drawText("taskID: \(taskID)", at: CGPoint(x: 18, y: 76), size: 8, weight: .regular)
             }
         } else {
             for (index, document) in documents.enumerated() {
-                drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage)
+                drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM, calibration: calibration)
             }
         }
         context.closePDF()
         return RenderResult(url: outputURL, fileName: fileName, documentIds: ids, error: nil)
+    }
+
+    /// 校准的文件名后缀：默认（identity）返回空串以保持纯 taskID 文件名；
+    /// 非默认时编码偏移/旋转/缩放/自适应，确保不同校准产出不同 URL。
+    static func calibrationToken(_ calibration: PrinterCalibration) -> String {
+        guard calibration != .identity else { return "" }
+        let ox = Int((calibration.offsetXMM * 10).rounded())
+        let oy = Int((calibration.offsetYMM * 10).rounded())
+        let sc = Int((calibration.scaleRatio * 100).rounded())
+        return "-cal\(ox)_\(oy)_\(calibration.rotationDegrees)_\(sc)_\(calibration.adaptivePaper ? "a" : "f")"
+    }
+
+    /// 字号的文件名后缀：与默认值（3.2 / 2.5mm）一致时返回空串，保持纯 taskID 文件名
+    /// （兼容协议回放与既有断言）；偏离默认时编码字号，确保调字号后 URL 变化、预览刷新。
+    static func fontToken(itemInfoFontMM: CGFloat, memoFontMM: CGFloat) -> String {
+        let item = Int((itemInfoFontMM * 10).rounded())
+        let memo = Int((memoFontMM * 10).rounded())
+        guard item != 32 || memo != 25 else { return "" }
+        return "-fnt\(item)_\(memo)"
     }
 
     /// 把 74×126mm 内容盒水平居中、顶部对齐放入纸张外框。
@@ -983,6 +1195,19 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         // 顶部对齐：PDF 坐标系原点在左下，内容盒顶边贴纸张顶边。
         let originY = max(0, pageRect.height - contentHeight)
         return CGRect(x: originX, y: originY, width: contentWidth, height: contentHeight)
+    }
+
+    /// 自适应纸张时把内容盒两轴居中放入足迹页。90/270 旋转后内容长边超过页高，
+    /// originY 为负属正常——旋转绕中心进行，最终居中填满足迹。
+    private func centeredContentRect(in pageRect: CGRect) -> CGRect {
+        let contentWidth = contentWidthMM * mmToPoint
+        let contentHeight = contentHeightMM * mmToPoint
+        return CGRect(
+            x: (pageRect.width - contentWidth) / 2,
+            y: (pageRect.height - contentHeight) / 2,
+            width: contentWidth,
+            height: contentHeight
+        )
     }
 
     func writeFallbackPDF(outputDirectory: URL, requestID: String, taskID: String) -> RenderResult {
@@ -1013,8 +1238,8 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         return Data(text.utf8)
     }
 
-    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int, hideTaoLogo: Bool, hideCourierPackage: Bool) {
-        drawPage(context: context, pageRect: pageRect, contentRect: contentRect) {
+    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int, hideTaoLogo: Bool, hideCourierPackage: Bool, hideBorder: Bool, itemInfoFontMM: CGFloat, memoFontMM: CGFloat, calibration: PrinterCalibration) {
+        drawPage(context: context, pageRect: pageRect, contentRect: contentRect, calibration: calibration) {
             let parts = splitContents(document)
             let decrypted = decryptWaybillContent(parts.standard)
             let customData = parts.custom.object("data")
@@ -1028,16 +1253,31 @@ final class NativeWaybillRenderer: @unchecked Sendable {
                 pageNumber: index + 1,
                 pageCount: count,
                 hideTaoLogo: hideTaoLogo,
-                hideCourierPackage: hideCourierPackage
+                hideCourierPackage: hideCourierPackage,
+                hideBorder: hideBorder,
+                itemInfoFontMM: itemInfoFontMM,
+                memoFontMM: memoFontMM
             )
         }
     }
 
-    private func drawPage(context: CGContext, pageRect: CGRect, contentRect: CGRect, draw: () -> Void) {
+    private func drawPage(context: CGContext, pageRect: CGRect, contentRect: CGRect, calibration: PrinterCalibration = .identity, draw: () -> Void) {
         context.beginPDFPage(nil)
         context.saveGState()
         context.setFillColor(NSColor.white.cgColor)
         context.fill(pageRect)
+        // 校准变换：缩放 → 旋转 → 偏移，绕内容盒中心轴心，应用在现有定位之前。
+        // 旋转方向：rotate(by:) 弧度、逆时针为正；与产品期望不符则对 theta 取负。
+        let cx = contentRect.midX
+        let cy = contentRect.midY
+        let offX = CGFloat(calibration.offsetXMM) * mmToPoint
+        let offY = CGFloat(calibration.offsetYMM) * mmToPoint
+        let theta = CGFloat(calibration.rotationDegrees % 360) * .pi / 180
+        context.translateBy(x: offX, y: -offY)   // device y 朝上，故 +向下 用 -offY
+        context.translateBy(x: cx, y: cy)
+        context.rotate(by: theta)
+        context.scaleBy(x: CGFloat(calibration.scaleRatio), y: CGFloat(calibration.scaleRatio))
+        context.translateBy(x: -cx, y: -cy)
         // 平移到内容盒左上角，使内 mm() 绝对坐标落在居中/顶部对齐后的内容盒内。
         context.translateBy(x: contentRect.minX, y: contentRect.minY + contentRect.height)
         context.scaleBy(x: 1, y: -1)
@@ -1078,6 +1318,31 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         }
     }
 
+    /// 解密单个文档并提取卡片所需的真实展示字段（运单号 / 收件人 / 电话 / 省市区）。
+    /// 复用 splitContents + decryptWaybillContent 的解密路径；运单号取解密内容的
+    /// waybillCode（回退 custom 区条码 / documentID），地区取解密 JSON 的 recipient.address。
+    func extractDocumentInfo(_ document: [String: JSONValue]) -> ExtractedDocumentInfo {
+        let parts = splitContents(document)
+        let decrypted = decryptWaybillContent(parts.standard)
+        let customData = parts.custom.object("data")
+        let recipient = decrypted.object("recipient")
+        let address = recipient.object("address")
+        let waybillCode = firstNonEmpty([
+            decrypted.string("waybillCode"),
+            customData.string("WAIBILLNO_BAR_CODE"),
+            document.string("documentID", default: document.string("documentId")),
+        ])
+        return ExtractedDocumentInfo(
+            waybillCode: waybillCode,
+            receiverName: recipient.string("name"),
+            receiverPhone: firstNonEmpty([recipient.string("mobile"), recipient.string("phone")]),
+            province: address.string("province"),
+            city: address.string("city"),
+            district: address.string("district")
+        )
+    }
+
+
     private func drawCainiao300336(
         pageRect: CGRect,
         data: [String: JSONValue],
@@ -1087,10 +1352,15 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         pageNumber: Int,
         pageCount: Int,
         hideTaoLogo: Bool,
-        hideCourierPackage: Bool
+        hideCourierPackage: Bool,
+        hideBorder: Bool,
+        itemInfoFontMM: CGFloat,
+        memoFontMM: CGFloat
     ) {
         let values = buildTemplateValues(data: data, standard: standard, customData: customData, documentID: documentID, pageNumber: pageNumber, pageCount: pageCount)
-        strokeMMRect(x: 5, y: 0.6, width: 65, height: 125.4, lineWidth: 0.4)
+        if !hideBorder {
+            strokeMMRect(x: 5, y: 0.6, width: 65, height: 125.4, lineWidth: 0.4)
+        }
         if !hideTaoLogo {
             drawTemplateText("淘", x: 6.4, y: 2.58, width: 6.92, height: 5.31, size: 5.4, weight: .bold, align: .center, valign: .middle)
         }
@@ -1161,7 +1431,7 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             drawTemplateText(values.privacyNumber, x: 20.86, y: 45.3, width: 42.47, height: 4.81, size: 4.3, weight: .bold, valign: .middle)
         }
 
-        drawCustomArea(customData)
+        drawCustomArea(customData, itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM)
     }
 
     private func buildTemplateValues(
@@ -1223,18 +1493,36 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         return sender
     }
 
-    private func drawCustomArea(_ customData: [String: JSONValue]) {
+    private func drawCustomArea(_ customData: [String: JSONValue], itemInfoFontMM: CGFloat, memoFontMM: CGFloat) {
         let showItem = customData.bool("showItemInfo") ?? true
         let itemText = showItem ? customData.string("ITEM_INFO") : customData.string("PAGE_PRINT_TIPS")
-        let itemFontSize = min(4.2, max(2.6, (Double(customData.string("itemInfoFontSize")) ?? 10) * 0.32))
-        let contentX: CGFloat = 5.4
-        let contentWidth: CGFloat = 53.2
-        drawTemplateText(itemText, x: contentX, y: 76.6, width: 62, height: 7.4, size: itemFontSize, weight: .bold, wrap: true)
-        drawTemplateText(customData.string("SELLER_MEMO"), x: contentX, y: 85.0, width: contentWidth, height: 7.0, size: 2.5, wrap: true)
-        drawTemplateText(customData.string("BUYER_MEMO"), x: contentX, y: 92.8, width: contentWidth, height: 7.0, size: 2.5, wrap: true)
+        // 自定义区从 y≈76.6mm 起向下流式排布，充分利用底部留白：
+        // 字段按实际文字高度依次下移，大字号可多行完整显示，不再被固定窄框压住。
+        // 商品信息字号由全局偏好决定，始终覆盖 payload 的 itemInfoFontSize。
+        let topY: CGFloat = 76.6
+        let bottomY: CGFloat = 124          // 内容盒高 126mm，底部留约 2mm 余量
+        let gap: CGFloat = 1.2              // 字段间距
+        let leftX: CGFloat = 5.4
+        // 统一列宽，避开右下角「商品数量」列（x=58.8），任意纵向高度都不会与之重叠。
+        let colWidth: CGFloat = 53.2
+
+        var cursorY = topY
+        func flow(_ text: String, size: CGFloat, weight: NSFont.Weight) {
+            guard !text.isEmpty, cursorY < bottomY else { return }
+            let available = bottomY - cursorY
+            let used = drawTemplateText(text, x: leftX, y: cursorY, width: colWidth, height: available, size: size, weight: weight, wrap: true)
+            cursorY += used + gap
+        }
+
+        flow(itemText, size: itemInfoFontMM, weight: .bold)
+        flow(customData.string("SELLER_MEMO"), size: memoFontMM, weight: .regular)
+        flow(customData.string("BUYER_MEMO"), size: memoFontMM, weight: .regular)
+
+        // 商品数量固定在右下角，独立于左侧流式文本列。
         drawTemplateText(customData.string("ITEM_TOTAL_COUNT"), x: 58.8, y: 97, width: 10.6, height: 9, size: 6.8, weight: .bold, fill: .darkGray, align: .center, valign: .middle)
     }
 
+    @discardableResult
     private func drawTemplateText(
         _ value: String,
         x: CGFloat,
@@ -1248,13 +1536,13 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         align: TextAlign = .left,
         valign: VerticalAlign = .top,
         wrap: Bool = false
-    ) {
+    ) -> CGFloat {
         let rect = mmRect(x: x, y: y, width: width, height: height)
         if let background {
             background.setFill()
             rect.fill()
         }
-        guard !value.isEmpty else { return }
+        guard !value.isEmpty else { return 0 }
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = align.nsAlignment
         paragraph.lineBreakMode = wrap ? .byWordWrapping : .byTruncatingTail
@@ -1280,6 +1568,8 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             drawY = rect.maxY - drawHeight
         }
         attributed.draw(with: CGRect(x: rect.minX, y: drawY, width: rect.width, height: drawHeight), options: [.usesLineFragmentOrigin, .usesFontLeading])
+        // 返回内容实际占用的毫米高度（受框高 height 限制），供流式布局测量下一字段起点。
+        return min(height, measured.height / mmToPoint)
     }
 
     private func drawRotatedTemplateText(_ value: String, x: CGFloat, y: CGFloat, angle: CGFloat, size: CGFloat) {
@@ -1474,8 +1764,9 @@ private func describeTaskResult(shouldReturnPreview: Bool, physicalPrintJob: Phy
 
 func buildLprArgs(printerName: String, pdfURL: URL, settings: PrintSettings) -> [String] {
     var args = ["-P", printerName]
-    if !settings.media.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        args += ["-o", "media=\(settings.media)"]
+    let media = resolvedMediaString(settings: settings)
+    if !media.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        args += ["-o", "media=\(media)"]
     }
     if settings.fitToPage {
         args += ["-o", "fit-to-page"]
@@ -1484,15 +1775,29 @@ func buildLprArgs(printerName: String, pdfURL: URL, settings: PrintSettings) -> 
     return args
 }
 
+/// 自适应纸张时用内容足迹算出的自定义 media（`<w>x<h>mm`，同 catalog 形式）；否则用手选预设。
+/// 渲染 mediaBox 与 lpr media 共用此结果，确保一致。
+func resolvedMediaString(settings: PrintSettings) -> String {
+    guard settings.adaptivePaper else { return settings.media }
+    let f = adaptiveFootprintMM(rotationDegrees: settings.rotationDegrees, scaleRatio: settings.scaleRatio)
+    return "\(Int(f.w.rounded()))x\(Int(f.h.rounded()))mm"
+}
+
 func buildPhysicalPrintDedupeKey(printerName: String, docs: [ProtocolDocument], settings: PrintSettings) -> String {
     let ids = docs.map(\.documentId).joined(separator: ",")
     let fingerprints = docs.map(\.fingerprint).joined(separator: ",")
+    let fmt = { (value: Double) in String(format: "%.3f", value) }
     return [
         "physical",
         printerName,
-        settings.media.isEmpty ? "(default-media)" : settings.media,
+        resolvedMediaString(settings: settings).isEmpty ? "(default-media)" : resolvedMediaString(settings: settings),
         settings.fitToPage ? "fit" : "nofit",
         settings.flipPrint ? "flip" : "noflip",
+        "offX:\(fmt(settings.offsetXMM))",
+        "offY:\(fmt(settings.offsetYMM))",
+        "rot:\(settings.rotationDegrees % 360)",
+        "scale:\(fmt(settings.scaleRatio))",
+        settings.adaptivePaper ? "adaptive" : "fixed",
         ids,
         fingerprints,
     ].joined(separator: "|")
@@ -1802,6 +2107,10 @@ extension NativePrintService {
             task.documentCount = Int(Double(event["documentCount"]?.stringValue ?? "\(task.documentCount)") ?? Double(task.documentCount))
             task.mode = event.string("mode", default: task.mode)
             task.result = event.string("result", default: task.result)
+            let parsedDocs = decodeDocuments(from: event)
+            if !parsedDocs.isEmpty {
+                task.documents = parsedDocs
+            }
             if phase == "finish" {
                 task.isInProgress = false
             } else if phase == "start" {
@@ -1823,9 +2132,12 @@ extension NativePrintService {
                   let id = event["requestID"]?.stringValue ?? event["taskID"]?.stringValue else {
                 continue
             }
+            // 重试路径的 phase 带 "retry-" 前缀（retry-dry-run / retry-submitted / retry-failed），
+            // 去掉前缀后与正常打印复用同一套状态映射，避免重试后任务被错判为「待打印」。
             let phase = event.string("phase")
+            let normalizedPhase = phase.hasPrefix("retry-") ? String(phase.dropFirst("retry-".count)) : phase
             let status: PrintJobStatus
-            switch phase {
+            switch normalizedPhase {
             case "duplicate-suppressed":
                 status = .skippedDuplicate
             case "dry-run":
@@ -1846,7 +2158,8 @@ extension NativePrintService {
                 pdfPath: event.string("pdfPath", default: event.string("previousPdfPath")),
                 status: status,
                 errorMessage: error.isEmpty ? duplicateMessage : error,
-                commandText: event.string("commandText", default: event.string("previousCommandText"))
+                commandText: event.string("commandText", default: event.string("previousCommandText")),
+                documents: decodeDocuments(from: event)
             ), event.string("time"))
         }
         return jobs.values.sorted {
@@ -1859,6 +2172,20 @@ extension NativePrintService {
         let prefix = "[cainiao-mock:event] "
         guard line.hasPrefix(prefix) else { return nil }
         return try? JSONValue.parse(String(line.dropFirst(prefix.count))).objectValue
+    }
+
+    /// 从事件的 documents 数组解析出 QueueDocument（电话留空，由 snapshot() 注入）。
+    /// 缺失字段时返回空数组，下游回退占位卡。
+    private static func decodeDocuments(from event: [String: JSONValue]) -> [QueueDocument] {
+        event.array("documents").compactMap(\.objectValue).map { doc in
+            QueueDocument(
+                waybillCode: doc.string("waybillCode"),
+                receiverName: doc.string("receiverName"),
+                province: doc.string("province"),
+                city: doc.string("city"),
+                district: doc.string("district")
+            )
+        }
     }
 }
 

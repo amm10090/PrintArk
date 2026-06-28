@@ -39,6 +39,132 @@ final class TabooprintTests: XCTestCase {
         XCTAssertEqual(previewTask.resultDisplay, "预览成功")
     }
 
+    func testQueueJobsIncludePreviewTasksWithoutDuplicatingPrintJobs() {
+        let previewTask = RecentTask(
+            id: "RID-PREVIEW",
+            timestampText: "2026-06-24 12:00:00",
+            command: "print",
+            requestID: "RID-PREVIEW",
+            documentCount: 1,
+            mode: "default-preview",
+            result: "preview",
+            isInProgress: false
+        )
+        let physicalTask = RecentTask(
+            id: "RID-PHYSICAL",
+            timestampText: "2026-06-24 12:01:00",
+            command: "print",
+            requestID: "RID-PHYSICAL",
+            documentCount: 1,
+            mode: "respect-preview-flag",
+            result: "physical-dry-run",
+            isInProgress: false
+        )
+        let physicalJob = PrintJob(
+            id: "RID-PHYSICAL",
+            waybillCode: "TASK-PHYSICAL",
+            printerName: "TAOBAO",
+            pdfPath: "/tmp/TASK-PHYSICAL.pdf",
+            status: .dryRun,
+            errorMessage: nil,
+            commandText: "lpr -P TAOBAO /tmp/TASK-PHYSICAL.pdf"
+        )
+
+        let jobs = QueueJob.merged(printJobs: [physicalJob], recentTasks: [previewTask, physicalTask])
+
+        XCTAssertEqual(jobs.map(\.id), ["RID-PHYSICAL", "RID-PREVIEW"])
+        XCTAssertEqual(jobs[0].kind, .dryRun)
+        XCTAssertEqual(jobs[1].kind, .preview)
+        XCTAssertEqual(jobs[1].status, .done)
+    }
+
+    func testQueueJobExpandsMultiDocumentTaskIntoMultipleCards() {
+        let task = RecentTask(
+            id: "RID-MULTI",
+            timestampText: "2026-06-27 09:00:00",
+            command: "print",
+            requestID: "RID-MULTI",
+            documentCount: 2,
+            mode: "default-preview",
+            result: "preview",
+            isInProgress: false,
+            documents: [
+                QueueDocument(waybillCode: "WB-001", receiverName: "张三", receiverPhone: "13800000001", province: "浙江省", city: "杭州市", district: "西湖区"),
+                QueueDocument(waybillCode: "WB-002", receiverName: "李四", receiverPhone: "13800000002", province: "江苏省", city: "苏州市", district: "姑苏区"),
+            ]
+        )
+
+        let jobs = QueueJob.merged(printJobs: [], recentTasks: [task])
+
+        XCTAssertEqual(jobs.count, 2)
+        XCTAssertEqual(jobs.map(\.id), ["RID-MULTI#0", "RID-MULTI#1"])
+        // 标题用真实运单号，不是 requestID。
+        XCTAssertEqual(jobs[0].waybillCode, "WB-001")
+        XCTAssertEqual(jobs[1].waybillCode, "WB-002")
+        // 收件人不脱敏，电话原样保留。
+        XCTAssertEqual(jobs[0].receiverName, "张三")
+        XCTAssertEqual(jobs[0].receiverPhone, "13800000001")
+        // 地区为省+市+区拼接。
+        XCTAssertEqual(jobs[0].regionText, "浙江省杭州市西湖区")
+        XCTAssertEqual(jobs[1].regionText, "江苏省苏州市姑苏区")
+    }
+
+    func testQueueJobFallsBackToPlaceholderWhenNoDocuments() {
+        let task = RecentTask(
+            id: "RID-LEGACY",
+            timestampText: "2026-06-27 09:05:00",
+            command: "print",
+            requestID: "RID-LEGACY",
+            documentCount: 3,
+            mode: "default-preview",
+            result: "preview",
+            isInProgress: false
+        )
+
+        let jobs = QueueJob.merged(printJobs: [], recentTasks: [task])
+
+        XCTAssertEqual(jobs.count, 1)
+        XCTAssertEqual(jobs[0].id, "RID-LEGACY")
+        // 旧事件日志无 documents → 回退占位卡，标题用 requestID，收件人脱敏占位。
+        XCTAssertEqual(jobs[0].waybillCode, "RID-LEGACY")
+        XCTAssertEqual(jobs[0].receiverName, "收件人已脱敏")
+        XCTAssertTrue(jobs[0].regionText.isEmpty)
+    }
+
+    func testParseRecentTasksReadsDocumentsArray() {
+        let event = #"[cainiao-mock:event] {"type":"task","phase":"finish","requestID":"RID-DOC","taskID":"TASK-DOC","command":"print","documentCount":2,"mode":"default-preview","result":"preview","documents":[{"waybillCode":"YT001","receiverName":"王五","province":"广东省","city":"广州市","district":"天河区"},{"waybillCode":"YT002","receiverName":"赵六","province":"北京市","city":"北京市","district":"朝阳区"}]}"#
+
+        let tasks = NativePrintService.parseRecentTasks(from: [event])
+
+        XCTAssertEqual(tasks.count, 1)
+        XCTAssertEqual(tasks[0].documents.count, 2)
+        XCTAssertEqual(tasks[0].documents[0].waybillCode, "YT001")
+        XCTAssertEqual(tasks[0].documents[0].receiverName, "王五")
+        XCTAssertEqual(tasks[0].documents[0].regionText, "广东省广州市天河区")
+        // 电话不落盘：日志事件不含 phone，parse 出的电话为空。
+        XCTAssertEqual(tasks[0].documents[0].receiverPhone, "")
+        XCTAssertEqual(tasks[0].documents[1].waybillCode, "YT002")
+    }
+
+    func testParsePrintJobsReadsDocumentsArray() {
+        let event = #"[cainiao-mock:event] {"type":"print-job","phase":"dry-run","requestID":"RID-PJ","taskID":"TASK-PJ","printer":"TAOBAO","documentCount":1,"pdfPath":"/tmp/x.pdf","commandText":"lpr","documents":[{"waybillCode":"SF999","receiverName":"钱七","province":"四川省","city":"成都市","district":"高新区"}]}"#
+
+        let jobs = NativePrintService.parsePrintJobs(from: [event], fallbackPrinter: "TAOBAO")
+
+        XCTAssertEqual(jobs.count, 1)
+        XCTAssertEqual(jobs[0].documents.count, 1)
+        XCTAssertEqual(jobs[0].documents[0].waybillCode, "SF999")
+        XCTAssertEqual(jobs[0].documents[0].regionText, "四川省成都市高新区")
+        XCTAssertEqual(jobs[0].documents[0].receiverPhone, "")
+    }
+
+    func testEventLogDoesNotContainReceiverPhone() {
+        let event = #"[cainiao-mock:event] {"type":"task","phase":"finish","requestID":"RID-NOPHONE","documents":[{"waybillCode":"YT001","receiverName":"王五","province":"广东省","city":"广州市","district":"天河区"}]}"#
+        // 合规：结构化事件日志不得含电话字段。
+        XCTAssertFalse(event.contains("receiverPhone"))
+        XCTAssertFalse(event.contains("phone"))
+    }
+
     func testPrintSettingsDefaultToDryRun() {
         let settings = PrintSettings(
             printerName: "TAOBAO",
@@ -72,6 +198,58 @@ final class TabooprintTests: XCTestCase {
         XCTAssertFalse(settings.dedupe)
     }
 
+    func testRetryPhysicalPrintMissingPDFReturnsError() {
+        let service = NativePrintService()
+        service.updateConfiguration(PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10))
+
+        let job = service.retryPhysicalPrint(requestID: "RID-MISSING", pdfPath: "/tmp/tabooprint/does-not-exist-\(UUID().uuidString).pdf", printerName: "TAOBAO")
+
+        XCTAssertFalse(job.ok)
+        XCTAssertNotNil(job.error)
+        XCTAssertTrue(job.error?.contains("PDF 不存在") ?? false)
+    }
+
+    func testRetryPhysicalPrintDryRunEmitsRetryPhaseAndSkipsProcess() throws {
+        let service = NativePrintService()
+        service.updateConfiguration(PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10))
+
+        let captured = LogCollector()
+        service.setLogSink { line in captured.append(line) }
+
+        // 落盘一个真实存在的最小 PDF，触发重打路径（dryRun 下不跑 lpr）。
+        let pdfURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("retry-\(UUID().uuidString).pdf")
+        try Data("%PDF-1.4\n%%EOF\n".utf8).write(to: pdfURL)
+        defer { try? FileManager.default.removeItem(at: pdfURL) }
+
+        let job = service.retryPhysicalPrint(requestID: "RID-RETRY", pdfPath: pdfURL.path, printerName: "TAOBAO")
+
+        XCTAssertTrue(job.ok)
+        XCTAssertTrue(job.dryRun)
+        XCTAssertFalse(job.duplicate)
+        XCTAssertFalse(job.commandText.isEmpty)
+        // dryRun 重试发出 retry-dry-run phase，不发 retry-submitted（未跑 Process）。
+        XCTAssertTrue(captured.lines.contains { $0.contains("retry-dry-run") })
+        XCTAssertFalse(captured.lines.contains { $0.contains("retry-submitted") })
+    }
+
+    func testRetryPhysicalPrintBypassesDedupeHistory() throws {
+        let service = NativePrintService()
+        service.updateConfiguration(PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10))
+
+        let pdfURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("retry-dedupe-\(UUID().uuidString).pdf")
+        try Data("%PDF-1.4\n%%EOF\n".utf8).write(to: pdfURL)
+        defer { try? FileManager.default.removeItem(at: pdfURL) }
+
+        // 连续两次重试同一 PDF：因为重试不查 / 不写去重历史，两次都应成功提交（非 duplicate）。
+        let first = service.retryPhysicalPrint(requestID: "RID-DEDUPE", pdfPath: pdfURL.path, printerName: "TAOBAO")
+        let second = service.retryPhysicalPrint(requestID: "RID-DEDUPE", pdfPath: pdfURL.path, printerName: "TAOBAO")
+
+        XCTAssertTrue(first.ok)
+        XCTAssertFalse(first.duplicate)
+        XCTAssertTrue(second.ok)
+        XCTAssertFalse(second.duplicate, "重试必须绕过去重，第二次不应被 duplicate 抑制")
+    }
+
     func testJSONValueRoundTripsCommandPayload() throws {
         let value = try JSONValue.parse(#"{"cmd":"getAgentInfo","requestID":"RID","preview":true}"#)
         let object = try XCTUnwrap(value.objectValue)
@@ -97,6 +275,26 @@ final class TabooprintTests: XCTestCase {
         // 默认纸张为 100×180mm，mediaBox 等于纸张外框尺寸。
         XCTAssertEqual(mediaBox.width, 100 * 72 / 25.4, accuracy: 0.01)
         XCTAssertEqual(mediaBox.height, 180 * 72 / 25.4, accuracy: 0.01)
+    }
+
+    func testNativeRendererCalibrationTokenChangesFilename() throws {
+        // 默认校准保持纯 taskID 文件名（兼容协议回放与既有断言）。
+        XCTAssertEqual(NativeWaybillRenderer.calibrationToken(.identity), "")
+
+        let renderer = NativeWaybillRenderer()
+        let outputDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+        let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
+
+        let plain = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "TASK")
+        XCTAssertEqual(plain.fileName, "TASK.pdf")
+
+        // 非默认校准产出不同文件名，使 latestPreviewPDF/PDFView 能感知 URL 变化并刷新。
+        var calibration = PrinterCalibration.identity
+        calibration.offsetXMM = 2.5
+        let shifted = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "TASK", calibration: calibration)
+        XCTAssertNotEqual(shifted.fileName, plain.fileName)
+        XCTAssertTrue(shifted.fileName.hasPrefix("TASK-cal"))
     }
 
     func testNativeRendererUsesNativeContentBoxForMatchingPaper() throws {
@@ -126,6 +324,35 @@ final class TabooprintTests: XCTestCase {
 
         XCTAssertEqual(mediaBox.width, 210 * 72 / 25.4, accuracy: 0.01)
         XCTAssertEqual(mediaBox.height, 297 * 72 / 25.4, accuracy: 0.01)
+    }
+
+    func testAdaptivePaperSizesMediaBoxToContentFootprint() throws {
+        let renderer = NativeWaybillRenderer()
+        let outputDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+        let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
+
+        func mediaBox(_ cal: PrinterCalibration, _ taskID: String) throws -> CGRect {
+            // 手选 A4，但自适应应忽略它，按内容足迹定页。
+            let result = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: taskID, paperSize: PaperCatalog.match(media: "A4"), calibration: cal)
+            let document = try XCTUnwrap(CGPDFDocument(result.url as CFURL))
+            return try XCTUnwrap(document.page(at: 1)).getBoxRect(.mediaBox)
+        }
+
+        // 自适应 + 0°：足迹 = 内容盒 74×126mm。
+        let rot0 = try mediaBox(PrinterCalibration(adaptivePaper: true), "ADAPT0")
+        XCTAssertEqual(rot0.width, 74 * 72 / 25.4, accuracy: 0.01)
+        XCTAssertEqual(rot0.height, 126 * 72 / 25.4, accuracy: 0.01)
+
+        // 自适应 + 90°：交换长短边 → 126×74mm。
+        let rot90 = try mediaBox(PrinterCalibration(rotationDegrees: 90, adaptivePaper: true), "ADAPT90")
+        XCTAssertEqual(rot90.width, 126 * 72 / 25.4, accuracy: 0.01)
+        XCTAssertEqual(rot90.height, 74 * 72 / 25.4, accuracy: 0.01)
+
+        // 自适应 + 2× 缩放：足迹按比例放大 → 148×252mm。
+        let scaled = try mediaBox(PrinterCalibration(scaleRatio: 2.0, adaptivePaper: true), "ADAPT2X")
+        XCTAssertEqual(scaled.width, 148 * 72 / 25.4, accuracy: 0.01)
+        XCTAssertEqual(scaled.height, 252 * 72 / 25.4, accuracy: 0.01)
     }
 
     func testPaperCatalogMatchesAndFallsBack() {
@@ -317,7 +544,30 @@ final class TabooprintTests: XCTestCase {
             "-o", "fit-to-page",
             "/tmp/tabooprint/waybills/TASK.pdf",
         ])
-        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|noflip|DOC1,DOC2|FP1,FP2")
+        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|noflip|offX:0.000|offY:0.000|rot:0|scale:1.000|fixed|DOC1,DOC2|FP1,FP2")
+    }
+
+    func testCalibrationChangesDedupeKeyAndAdaptiveMedia() throws {
+        let base = PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10)
+        let docs = [ProtocolDocument(documentId: "DOC1", fingerprint: "FP1", index: 0)]
+        let baseKey = buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: base)
+
+        // 每个校准字段变化都必须改变 dedupe key，否则改校准会被当重复打印抑制。
+        var offset = base; offset.offsetXMM = 2
+        XCTAssertNotEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: offset), baseKey)
+        var rotated = base; rotated.rotationDegrees = 90
+        XCTAssertNotEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: rotated), baseKey)
+        var scaled = base; scaled.scaleRatio = 1.5
+        XCTAssertNotEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: scaled), baseKey)
+        var adaptive = base; adaptive.adaptivePaper = true
+        XCTAssertNotEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: adaptive), baseKey)
+
+        // 自适应纸张：媒体名取内容足迹；90° 旋转交换长短边 → 126x74mm。
+        XCTAssertEqual(resolvedMediaString(settings: adaptive), "74x126mm")
+        var adaptiveRot = base; adaptiveRot.adaptivePaper = true; adaptiveRot.rotationDegrees = 90
+        XCTAssertEqual(resolvedMediaString(settings: adaptiveRot), "126x74mm")
+        // 非自适应时媒体名维持手选预设。
+        XCTAssertEqual(resolvedMediaString(settings: base), "100x180mm")
     }
 
     func testFlipPrintAddsOrientationArgAndDedupeKey() throws {
@@ -333,7 +583,7 @@ final class TabooprintTests: XCTestCase {
             "-o", "fit-to-page",
             "/tmp/tabooprint/waybills/TASK.pdf",
         ])
-        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|flip|DOC1|FP1")
+        XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|flip|offX:0.000|offY:0.000|rot:0|scale:1.000|fixed|DOC1|FP1")
     }
 
     func testDocumentFingerprintIncludesEncryptedAndCustomFields() throws {
@@ -642,5 +892,19 @@ private final class TestWebSocketClient {
             data.append(contentsOf: try read(count: 1))
         }
         return data
+    }
+}
+
+/// 线程安全的日志收集器，供测试用 setLogSink（@Sendable 闭包）捕获 emit 的事件行。
+final class LogCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    func append(_ line: String) {
+        lock.withLock { storage.append(line) }
+    }
+
+    var lines: [String] {
+        lock.withLock { storage }
     }
 }

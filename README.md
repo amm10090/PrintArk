@@ -140,6 +140,15 @@ rtk .build/debug/Tabooprint --service-only --force-preview false --printer-name 
 rtk .build/debug/Tabooprint --service-only --force-preview false --printer-name TAOBAO --print-dry-run false --dedupe-window-ms 60000
 ```
 
+### 已验证打印机：AiYin QR-368（TSPL）
+
+实测可正常出纸的热敏机为 **AiYin QR-368**，其 CUPS PPD 的 `Personality` 为 `tspl`（TSPL 指令集）。Tabooprint 始终送出 **PDF**，由 CUPS 队列内置的 PostScript→TSPL 过滤链转换为打印机可识别的指令，因此不需要应用侧关心 TSPL。
+
+排障要点（基于一次真实定位）：
+
+- `lpr` 退出码为 0、CUPS 标记 job 为 completed，**不代表纸张真的打印出来了**。LPD/网络队列（如 `lpd://<host>/TAOBAO`）是“投递即完成”，远端设备是否真正出纸不回传状态。
+- 若提交成功却不出纸，先排查 CUPS/打印机侧而非应用：`lpstat -p <printer> -l`（看 `processing-to-stop-point` 等卡死状态）、`lpstat -W completed -l -o <printer>`、`/var/log/cups/error_log`，以及直接 `printf 'x\n' | lpr -P <printer>` 绕过应用验证。打印机/队列卡死时，重启打印机通常可清除。
+
 当前会先从本次 `print` payload 生成任务专属 PDF，再把这份 PDF 用于 preview URL 或 `lpr`。Swift 渲染器会解开 `contents[0].encryptedData`，并按当前中通 300336 标准模板与 73159162 自定义区的固定毫米坐标绘制：
 
 - 面单号 / 条码

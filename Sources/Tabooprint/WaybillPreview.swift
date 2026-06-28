@@ -4,14 +4,51 @@ import SwiftUI
 
 struct LabelPreviewWorkspace: View {
     let pdfURL: URL?
+    @ObservedObject var model: AppModel
 
-    @AppStorage(SettingsKeys.printMedia) private var printMedia = "100x180mm"
-    @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = false
-    @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = false
+    @AppStorage(SettingsKeys.printMedia) private var printMedia = "74x126mm"
+    @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = true
+    @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = true
+    @AppStorage(SettingsKeys.printHideBorder) private var hideBorder = true
+    @AppStorage(SettingsKeys.printerName) private var printerName = "TAOBAO"
     @State private var samplePDFURL: URL?
 
+    private var calibration: PrinterCalibration {
+        // 无记录打印机回退到出厂默认（自适应纸张默认开），与打印路径
+        // resolvedPrintSettings() 一致，避免新装首帧预览「自适应关」而实际打印「自适应开」。
+        model.printerCalibrations[printerName] ?? .factoryDefault
+    }
+
+    /// 预览叠加的增量变换：当前校准相对「已烘焙进 PDF 的校准」的差值。
+    /// 静止时为零（显示像素级精确的已烘焙 PDF）；拖动校准时实时平滑反映，
+    /// 偏移为纯平移。防抖重烘焙完成后 bakedCalibration 同步，增量归零。
+    private var calibrationDelta: (offX: CGFloat, offY: CGFloat, rotation: Double, scale: CGFloat) {
+        let baked = model.bakedCalibration
+        let cur = calibration
+        let scaleRatio = baked.scaleRatio == 0 ? 1 : cur.scaleRatio / baked.scaleRatio
+        return (
+            offX: CGFloat(cur.offsetXMM - baked.offsetXMM),
+            offY: CGFloat(cur.offsetYMM - baked.offsetYMM),
+            rotation: Double((cur.rotationDegrees - baked.rotationDegrees) % 360),
+            scale: CGFloat(scaleRatio)
+        )
+    }
+
+    /// 内容盒中心在纸张外框中的相对锚点（UnitPoint）。
+    /// 非自适应顶部对齐：内容盒顶贴纸顶，中心 y = (126/2)/纸高；自适应两轴居中。
+    private var contentCenterAnchor: UnitPoint {
+        guard !calibration.adaptivePaper else { return UnitPoint(x: 0.5, y: 0.5) }
+        let h = paperSize.heightMM
+        let y = h > 0 ? (WaybillContentBox.heightMM / 2) / h : 0.5
+        return UnitPoint(x: 0.5, y: Double(y))
+    }
+
+    /// 预览外框尺寸：自适应纸张时按内容足迹，否则用手选纸张。
     private var paperSize: PaperSize {
-        PaperCatalog.match(media: printMedia)
+        let cal = calibration
+        guard cal.adaptivePaper else { return PaperCatalog.match(media: printMedia) }
+        let f = adaptiveFootprintMM(rotationDegrees: cal.rotationDegrees, scaleRatio: cal.scaleRatio)
+        return PaperSize(id: "adaptive", displayName: "自适应", media: "", widthMM: CGFloat(f.w), heightMM: CGFloat(f.h), group: .waybill)
     }
 
     private var displayURL: URL {
@@ -45,7 +82,7 @@ struct LabelPreviewWorkspace: View {
 
     @MainActor
     private func generateSamplePDF() -> URL {
-        (try? WaybillPreviewSamplePDF.writeSample(hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage)) ?? Self.placeholderSampleURL
+        (try? WaybillPreviewSamplePDF.writeSample(hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, paperSize: paperSize, calibration: calibration)) ?? Self.placeholderSampleURL
     }
 
     var body: some View {
@@ -59,9 +96,21 @@ struct LabelPreviewWorkspace: View {
 
                 GeometryReader { proxy in
                     let previewSize = WaybillPreviewLayout.fittedPDFSize(in: proxy.size, aspectRatio: paperSize.aspectRatio)
+                    let scale = previewSize.width / paperSize.widthMM
+                    let delta = calibrationDelta
 
-                    WaybillPDFCanvas(url: displayURL, size: previewSize)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    ZStack {
+                        WaybillPDFCanvas(url: displayURL, size: previewSize)
+                            .scaleEffect(delta.scale, anchor: contentCenterAnchor)
+                            .rotationEffect(.degrees(delta.rotation), anchor: contentCenterAnchor)
+                            .offset(x: delta.offX * scale, y: delta.offY * scale)
+
+                        // 零偏移基准虚线框：标注内容盒「移动前」的位置，不随校准变换移动。
+                        ZeroOffsetGuide(paperSize: paperSize, previewSize: previewSize, scale: scale)
+                    }
+                    .frame(width: previewSize.width, height: previewSize.height)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .animation(.easeOut(duration: 0.18), value: calibration)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -72,14 +121,18 @@ struct LabelPreviewWorkspace: View {
             guard pdfURL == nil, samplePDFURL == nil else { return }
             samplePDFURL = generateSamplePDF()
         }
-        .onChange(of: hideTaoLogo) { _ in
-            guard pdfURL == nil else { return }
-            samplePDFURL = generateSamplePDF()
-        }
-        .onChange(of: hideCourierPackage) { _ in
-            guard pdfURL == nil else { return }
-            samplePDFURL = generateSamplePDF()
-        }
+        .onChange(of: hideTaoLogo) { _ in regenerateSampleIfNeeded() }
+        .onChange(of: hideCourierPackage) { _ in regenerateSampleIfNeeded() }
+        .onChange(of: hideBorder) { _ in regenerateSampleIfNeeded() }
+        .onChange(of: printMedia) { _ in regenerateSampleIfNeeded() }
+        .onChange(of: printerName) { _ in regenerateSampleIfNeeded() }
+        .onChange(of: calibration) { _ in regenerateSampleIfNeeded() }
+    }
+
+    /// 仅当展示样本面单（无真实任务 PDF）时，按当前设置重绘样本。
+    private func regenerateSampleIfNeeded() {
+        guard pdfURL == nil else { return }
+        samplePDFURL = generateSamplePDF()
     }
 }
 
@@ -102,17 +155,21 @@ enum WaybillPreviewSamplePDF {
         .appendingPathComponent("tabooprint", isDirectory: true)
         .appendingPathComponent("preview-samples", isDirectory: true)
 
-    static func writeSample(to outputDirectory: URL = sampleDirectory, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false) throws -> URL {
+    static func writeSample(to outputDirectory: URL = sampleDirectory, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false, hideBorder: Bool = false, paperSize: PaperSize = PaperCatalog.default, calibration: PrinterCalibration = .identity) throws -> URL {
         let renderer = NativeWaybillRenderer()
-        // 文件名随开关状态变化，确保 URL 改变后 PDFView 一定重新加载。
-        let variantTaskID = "\(taskID)-\(hideTaoLogo ? "1" : "0")\(hideCourierPackage ? "1" : "0")"
+        // 文件名随所有影响渲染的输入变化，确保 URL 改变后 PDFView 一定重新加载。
+        let calToken = "\(Int((calibration.offsetXMM * 10).rounded()))_\(Int((calibration.offsetYMM * 10).rounded()))_\(calibration.rotationDegrees)_\(Int((calibration.scaleRatio * 100).rounded()))_\(calibration.adaptivePaper ? "a" : "f")"
+        let variantTaskID = "\(taskID)-\(hideTaoLogo ? "1" : "0")\(hideCourierPackage ? "1" : "0")\(hideBorder ? "1" : "0")-\(paperSize.id)-\(calToken)"
         let result = try renderer.render(
             payload: try samplePayload(for: .sample),
             outputDirectory: outputDirectory,
             requestID: requestID,
             taskID: variantTaskID,
+            paperSize: paperSize,
             hideTaoLogo: hideTaoLogo,
-            hideCourierPackage: hideCourierPackage
+            hideCourierPackage: hideCourierPackage,
+            hideBorder: hideBorder,
+            calibration: calibration
         )
         return result.url
     }
@@ -267,6 +324,33 @@ struct WaybillPDFCanvas: View {
                     .stroke(Color.black.opacity(0.06))
             }
             .shadow(color: .black.opacity(0.16), radius: 32, x: 0, y: 18)
+    }
+}
+
+/// 零偏移基准虚线框：画出内容盒（74×126mm 版面）在零校准时的位置，
+/// 不随校准变换移动，作为「移动前」参照，让偏移量与方向一目了然。
+struct ZeroOffsetGuide: View {
+    let paperSize: PaperSize
+    let previewSize: CGSize
+    let scale: CGFloat
+
+    private var contentRect: CGRect {
+        let w = WaybillContentBox.widthMM * scale
+        let h = WaybillContentBox.heightMM * scale
+        let x = (previewSize.width - w) / 2
+        // 非自适应：内容盒顶部对齐纸张顶部；自适应：两轴居中。
+        let y = paperSize.id == "adaptive" ? (previewSize.height - h) / 2 : 0
+        return CGRect(x: x, y: max(0, y), width: w, height: h)
+    }
+
+    var body: some View {
+        Path { path in
+            path.addRect(contentRect)
+        }
+        .stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+        .foregroundStyle(Color.accentColor.opacity(0.7))
+        .frame(width: previewSize.width, height: previewSize.height)
+        .allowsHitTesting(false)
     }
 }
 
@@ -655,14 +739,31 @@ struct TechnicalSpecItem: View {
 struct LabelPreviewWorkspace_Previews: PreviewProvider {
     static var previews: some View {
         Group {
-            LabelPreviewWorkspace(pdfURL: nil)
+            LabelPreviewWorkspace(pdfURL: nil, model: PreviewSamples.consoleModel)
                 .frame(width: 760, height: 720)
-                .previewDisplayName("预览工作台")
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("预览工作台 · 样本 PDF")
+
+            LabelPreviewWorkspace(pdfURL: nil, model: PreviewSamples.model(.calibrated))
+                .frame(width: 760, height: 720)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("预览工作台 · 校准")
 
             WaybillCanvas(document: .sample)
                 .padding(32)
                 .background(Color(nsColor: .windowBackgroundColor))
-                .previewDisplayName("面单画布")
+                .previewDisplayName("面单画布 · 默认")
+
+            WaybillCanvas(document: PreviewSamples.longDocument)
+                .padding(32)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .previewDisplayName("面单画布 · 长文本")
+
+            TechnicalSpecStrip(paperSize: PaperCatalog.match(media: "A4"))
+                .padding(24)
+                .frame(width: 640)
+                .defaultAppStorage(PreviewSamples.previewDefaults)
+                .previewDisplayName("技术规格 · A4")
         }
     }
 }
