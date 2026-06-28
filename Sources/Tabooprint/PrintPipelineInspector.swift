@@ -4,13 +4,13 @@ struct PrintPipelineInspector: View {
     @ObservedObject var model: AppModel
 
     @AppStorage(SettingsKeys.printerName) private var printerName = "TAOBAO"
-    @AppStorage(SettingsKeys.printMedia) private var printMedia = "100x180mm"
+    @AppStorage(SettingsKeys.printMedia) private var printMedia = "74x126mm"
     @AppStorage(SettingsKeys.printFitToPage) private var fitToPage = true
-    @AppStorage(SettingsKeys.printDedupe) private var duplicateProtection = true
+    @AppStorage(SettingsKeys.printDedupe) private var duplicateProtection = false
     @AppStorage(SettingsKeys.dedupeWindowMinutes) private var duplicateWindowMinutes = 10
-    @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = false
-    @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = false
-    @AppStorage(SettingsKeys.printHideBorder) private var hideBorder = false
+    @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = true
+    @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = true
+    @AppStorage(SettingsKeys.printHideBorder) private var hideBorder = true
 
     private var printers: [PrinterDevice] {
         var devices = model.printerDevices
@@ -134,8 +134,8 @@ struct LabelContentCard: View {
     @Binding var hideCourierPackage: Bool
     @Binding var hideBorder: Bool
 
-    @AppStorage(SettingsKeys.fontSizeItemInfoMM) private var itemInfoFontMM = 3.2
-    @AppStorage(SettingsKeys.fontSizeMemoMM) private var memoFontMM = 2.5
+    @AppStorage(SettingsKeys.fontSizeItemInfoMM) private var itemInfoFontMM = 3.5
+    @AppStorage(SettingsKeys.fontSizeMemoMM) private var memoFontMM = 5.5
 
     var body: some View {
         SettingsCard(title: "面单内容", subtitle: "选择是否打印这些标记。") {
@@ -168,13 +168,13 @@ struct PrinterCalibrationCard: View {
     @ObservedObject var model: AppModel
     let printerName: String
 
-    @AppStorage(SettingsKeys.printFlip) private var flipPrint = false
+    @AppStorage(SettingsKeys.printFlip) private var flipPrint = true
 
     private static let rotationOptions = [0, 90, 180, 270, 360]
 
     private var calibration: Binding<PrinterCalibration> {
         Binding(
-            get: { model.printerCalibrations[printerName] ?? .identity },
+            get: { model.printerCalibrations[printerName] ?? .factoryDefault },
             set: {
                 model.printerCalibrations[printerName] = $0
                 model.saveCalibrations()

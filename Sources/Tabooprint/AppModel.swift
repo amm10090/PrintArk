@@ -20,6 +20,53 @@ enum SettingsKeys {
     static let fontSizeMemoMM = "tabooprint.fontSizeMemoMM"
 }
 
+/// App 版本号单一数据源。版本页与日志引用此常量；
+/// build 脚本的 Info.plist（CFBundleShortVersionString）需人工对齐同一字面。
+/// 注意：协议伪装字段（getAgentInfo 的 "1.5.3.0"）不是 App 版本，与此无关。
+enum AppInfo {
+    static let version = "1.0.0"
+
+    /// 构建日期（本地化短日期）。以可执行文件的修改时间作为编译期代理——
+    /// `.app` 包与 `swift run` 都能取到，无需编译期注入宏。
+    static let buildDate: String = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let path = Bundle.main.executablePath
+            ?? CommandLine.arguments.first
+        if let path,
+           let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+           let date = attrs[.modificationDate] as? Date {
+            return formatter.string(from: date)
+        }
+        return formatter.string(from: Date())
+    }()
+}
+
+/// 出厂默认设置（集中注册）。仅对从未被显式写入的扁平键生效——
+/// 已有用户的已选值（更高优先级 domain）原样保留，满足「仅新装生效」。
+/// 校准类（offset/rotation/scale/adaptivePaper）按打印机存于 printerCalibrations JSON，
+/// register(defaults:) 覆盖不到，由 PrinterCalibration.factoryDefault 兜底。
+///
+/// 一致性约束：此表的默认值必须与各 `@AppStorage(...) = X` 字面值、
+/// 以及 `PrintSettings.current` 的 `?? 默认` 完全一致，否则两套默认值漂移。
+enum FactoryDefaults {
+    static func register() {
+        let values: [String: Any] = [
+            SettingsKeys.printMedia: "74x126mm",
+            SettingsKeys.printFitToPage: true,
+            SettingsKeys.printDedupe: false,
+            SettingsKeys.printFlip: true,
+            SettingsKeys.printHideTaoLogo: true,
+            SettingsKeys.printHideCourierPackage: true,
+            SettingsKeys.printHideBorder: true,
+            SettingsKeys.fontSizeItemInfoMM: 3.5,
+            SettingsKeys.fontSizeMemoMM: 5.5,
+            SettingsKeys.debugPreview: false,
+        ]
+        UserDefaults.standard.register(defaults: values)
+    }
+}
+
 enum RuntimeMode: String, CaseIterable, Identifiable {
     case defaultPreview
     case respectPreviewFlag
@@ -187,17 +234,17 @@ struct PrintSettings {
     static var current: PrintSettings {
         let defaults = UserDefaults.standard
         let printerName = defaults.string(forKey: SettingsKeys.printerName) ?? "TAOBAO"
-        let media = defaults.string(forKey: SettingsKeys.printMedia) ?? "100x180mm"
+        let media = defaults.string(forKey: SettingsKeys.printMedia) ?? "74x126mm"
         let dryRun = defaults.object(forKey: SettingsKeys.printDryRun) as? Bool ?? true
         let fitToPage = defaults.object(forKey: SettingsKeys.printFitToPage) as? Bool ?? true
-        let dedupe = defaults.object(forKey: SettingsKeys.printDedupe) as? Bool ?? true
+        let dedupe = defaults.object(forKey: SettingsKeys.printDedupe) as? Bool ?? false
         let dedupeWindowMinutes = defaults.object(forKey: SettingsKeys.dedupeWindowMinutes) as? Int ?? 10
-        let hideTaoLogo = defaults.object(forKey: SettingsKeys.printHideTaoLogo) as? Bool ?? false
-        let hideCourierPackage = defaults.object(forKey: SettingsKeys.printHideCourierPackage) as? Bool ?? false
-        let hideBorder = defaults.object(forKey: SettingsKeys.printHideBorder) as? Bool ?? false
-        let flipPrint = defaults.object(forKey: SettingsKeys.printFlip) as? Bool ?? false
-        let itemInfoFontMM = defaults.object(forKey: SettingsKeys.fontSizeItemInfoMM) as? Double ?? 3.2
-        let memoFontMM = defaults.object(forKey: SettingsKeys.fontSizeMemoMM) as? Double ?? 2.5
+        let hideTaoLogo = defaults.object(forKey: SettingsKeys.printHideTaoLogo) as? Bool ?? true
+        let hideCourierPackage = defaults.object(forKey: SettingsKeys.printHideCourierPackage) as? Bool ?? true
+        let hideBorder = defaults.object(forKey: SettingsKeys.printHideBorder) as? Bool ?? true
+        let flipPrint = defaults.object(forKey: SettingsKeys.printFlip) as? Bool ?? true
+        let itemInfoFontMM = defaults.object(forKey: SettingsKeys.fontSizeItemInfoMM) as? Double ?? 3.5
+        let memoFontMM = defaults.object(forKey: SettingsKeys.fontSizeMemoMM) as? Double ?? 5.5
         return PrintSettings(
             printerName: printerName.isEmpty ? "TAOBAO" : printerName,
             media: media,
@@ -321,7 +368,8 @@ final class AppModel: NSObject, ObservableObject {
         var settings = PrintSettings.current
         settings.dryRun = UserDefaults.standard.bool(forKey: SettingsKeys.debugPreview)
         // 注入当前选中打印机的校准；服务端消费这些具体值（不再按名二次查表）。
-        let cal = printerCalibrations[settings.printerName] ?? .identity
+        // 无记录打印机回退到出厂默认（自适应纸张开），而非纯零基线 identity。
+        let cal = printerCalibrations[settings.printerName] ?? .factoryDefault
         settings.offsetXMM = cal.offsetXMM
         settings.offsetYMM = cal.offsetYMM
         settings.rotationDegrees = cal.rotationDegrees

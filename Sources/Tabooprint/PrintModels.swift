@@ -31,6 +31,10 @@ struct PrinterCalibration: Codable, Equatable {
     var adaptivePaper: Bool = false
 
     static let identity = PrinterCalibration()
+
+    /// 出厂默认校准：偏移/旋转/缩放保持基线（与 identity 相同），仅自适应纸张默认开启。
+    /// 用于「某打印机尚无校准记录」时的初始回退值；不替换 identity 的增量预览基线语义。
+    static let factoryDefault = PrinterCalibration(adaptivePaper: true)
 }
 
 /// 自适应纸张时的内容足迹尺寸（mm）：74×126 内容盒经旋转交换长短边、再乘缩放。

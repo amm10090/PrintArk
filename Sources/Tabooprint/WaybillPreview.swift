@@ -6,15 +6,17 @@ struct LabelPreviewWorkspace: View {
     let pdfURL: URL?
     @ObservedObject var model: AppModel
 
-    @AppStorage(SettingsKeys.printMedia) private var printMedia = "100x180mm"
-    @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = false
-    @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = false
-    @AppStorage(SettingsKeys.printHideBorder) private var hideBorder = false
+    @AppStorage(SettingsKeys.printMedia) private var printMedia = "74x126mm"
+    @AppStorage(SettingsKeys.printHideTaoLogo) private var hideTaoLogo = true
+    @AppStorage(SettingsKeys.printHideCourierPackage) private var hideCourierPackage = true
+    @AppStorage(SettingsKeys.printHideBorder) private var hideBorder = true
     @AppStorage(SettingsKeys.printerName) private var printerName = "TAOBAO"
     @State private var samplePDFURL: URL?
 
     private var calibration: PrinterCalibration {
-        model.printerCalibrations[printerName] ?? .identity
+        // 无记录打印机回退到出厂默认（自适应纸张默认开），与打印路径
+        // resolvedPrintSettings() 一致，避免新装首帧预览「自适应关」而实际打印「自适应开」。
+        model.printerCalibrations[printerName] ?? .factoryDefault
     }
 
     /// 预览叠加的增量变换：当前校准相对「已烘焙进 PDF 的校准」的差值。

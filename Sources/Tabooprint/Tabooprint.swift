@@ -5,6 +5,9 @@ import SwiftUI
 @MainActor
 package enum TabooprintDesktopLauncher {
     package static func main() {
+        // 出厂默认设置注册必须在任何 UserDefaults 读取之前；headless 与 GUI 两条路径都经过此点。
+        FactoryDefaults.register()
+
         if ServiceOnlyRunner.runIfRequested() {
             return
         }

@@ -1532,6 +1532,35 @@ struct VersionSummaryCard: View {
 
     var body: some View {
         VStack(spacing: 16) {
+            SettingsCard(title: "版本信息", subtitle: "当前 App 版本与系统要求。") {
+                VStack(alignment: .leading, spacing: 9) {
+                    DedupKeyRow("版本号：v\(AppInfo.version)")
+                    DedupKeyRow("构建日期：\(AppInfo.buildDate)")
+                    DedupKeyRow("系统要求：macOS 13 或更高")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            SettingsCard(title: "服务信息", subtitle: "本机服务监听端口与协议兼容版本。") {
+                VStack(alignment: .leading, spacing: 9) {
+                    DedupKeyRow("WebSocket 端口：13528")
+                    DedupKeyRow("HTTP 预览端口：13525")
+                    DedupKeyRow("协议兼容版本：1.5.3.0")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            SettingsCard(title: "功能说明", subtitle: "本版要点。") {
+                VStack(alignment: .leading, spacing: 9) {
+                    DedupKeyRow("打印机校准（偏移 / 旋转 / 缩放）")
+                    DedupKeyRow("面单字段字号自定义")
+                    DedupKeyRow("打印队列卡片化")
+                    DedupKeyRow("自适应纸张")
+                    DedupKeyRow("失败任务重试")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             SettingsCard(title: "运行状态", subtitle: "当前本机服务。") {
                 VStack(alignment: .leading, spacing: 9) {
                     DedupKeyRow("服务：\(model.serviceState.title)")
