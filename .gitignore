@@ -25,6 +25,11 @@
 !.codex/environments/
 !.codex/environments/environment.toml
 
+# GitHub Actions CI.
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
+
 # Local/system/build noise.
 .DS_Store
 .build/
