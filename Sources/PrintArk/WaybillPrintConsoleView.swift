@@ -11,7 +11,7 @@ struct WaybillPrintConsoleView: View {
         } detail: {
             PrintWorkspaceContent(selection: sidebarSelection ?? .currentWaybill, model: model)
         }
-        .frame(minWidth: 1320, minHeight: 860)
+        .frame(minWidth: 1040, minHeight: 720)
     }
 }
 
@@ -103,13 +103,7 @@ struct PrintWorkspaceContent: View {
     var body: some View {
         switch selection {
         case .currentWaybill:
-            HSplitView {
-                LabelPreviewWorkspace(pdfURL: model.latestPreviewPDF, model: model)
-                    .frame(minWidth: 620)
-
-                PrintPipelineInspector(model: model)
-                    .frame(minWidth: 360, idealWidth: 390, maxWidth: 440)
-            }
+            CurrentWaybillWorkspace(model: model)
         case .printQueue:
             PrintQueueWorkspace(model: model)
         case .currentVersion:
@@ -122,6 +116,114 @@ struct PrintWorkspaceContent: View {
             }
         case .retryFailed:
             RetryFailedWorkspace(model: model)
+        }
+    }
+}
+
+/// 「当前面单」工作区:响应式布局。详情区宽度 ≥ 断点时预览与打印设置内联并排;
+/// 窄于断点时打印设置折叠,通过顶部工具按钮以右侧抽屉覆盖层临时展开(不挤压预览)。
+private struct CurrentWaybillWorkspace: View {
+    @ObservedObject var model: AppModel
+
+    /// 内联 / 抽屉切换断点(详情区可用宽度,非整窗宽)。
+    private static let inlineBreakpoint: CGFloat = 1280
+    /// 打印设置检视器宽度。
+    private static let inspectorWidth: CGFloat = 360
+
+    /// 宽屏内联模式下是否并排显示检视器(用户可临时收起);窄屏抽屉模式下是否弹出。
+    @State private var showInspector = true
+
+    var body: some View {
+        GeometryReader { geo in
+            let isWide = geo.size.width >= Self.inlineBreakpoint
+            ZStack(alignment: .topTrailing) {
+                if isWide {
+                    wideLayout
+                } else {
+                    narrowLayout
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 跨断点时重置检视器默认态:进宽屏内联展开,进窄屏折叠。
+            .onChange(of: isWide) { nowWide in
+                showInspector = nowWide
+            }
+            .onAppear { showInspector = isWide }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // 宽屏:预览 + 检视器内联并排(HSplitView),顶部工具按钮可临时收起检视器。
+    private var wideLayout: some View {
+        VStack(spacing: 0) {
+            inspectorToggleBar(symbolFilled: showInspector)
+            HSplitView {
+                LabelPreviewWorkspace(pdfURL: model.latestPreviewPDF, model: model)
+                    .frame(minWidth: 480)
+                if showInspector {
+                    PrintPipelineInspector(model: model)
+                        .frame(minWidth: 320, idealWidth: 360, maxWidth: 420)
+                }
+            }
+        }
+    }
+
+    // 窄屏:预览占满 + 顶部工具按钮;检视器以右侧抽屉覆盖层弹出(scrim 可点关)。
+    private var narrowLayout: some View {
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: 0) {
+                inspectorToggleBar(symbolFilled: showInspector)
+                LabelPreviewWorkspace(pdfURL: model.latestPreviewPDF, model: model)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if showInspector {
+                // Esc 关闭抽屉(仅在抽屉展开时拦截 cancelAction)。
+                Button("") { withAnimation(.easeOut(duration: 0.18)) { showInspector = false } }
+                    .keyboardShortcut(.cancelAction)
+                    .opacity(0)
+                    .frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+
+                // 半透明遮罩,点击关闭抽屉。
+                Color.black.opacity(0.18)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { withAnimation(.easeOut(duration: 0.18)) { showInspector = false } }
+                    .transition(.opacity)
+
+                PrintPipelineInspector(model: model)
+                    .frame(width: Self.inspectorWidth)
+                    .frame(maxHeight: .infinity)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .overlay(alignment: .leading) {
+                        Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 0.5)
+                    }
+                    .shadow(color: .black.opacity(0.18), radius: 12, x: -4, y: 0)
+                    .transition(.move(edge: .trailing))
+            }
+        }
+    }
+
+    private func inspectorToggleBar(symbolFilled: Bool) -> some View {
+        HStack {
+            Spacer()
+            Button {
+                withAnimation(.easeOut(duration: 0.2)) { showInspector.toggle() }
+            } label: {
+                Label("打印设置", systemImage: symbolFilled ? "sidebar.trailing" : "slider.horizontal.3")
+                    .labelStyle(.titleAndIcon)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .buttonStyle(.borderless)
+            .help(showInspector ? "隐藏打印设置" : "显示打印设置")
+            .keyboardShortcut("i", modifiers: [.command, .option])
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 0.5)
         }
     }
 }

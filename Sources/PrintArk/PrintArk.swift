@@ -98,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.title = "印舟"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 1320, height: 860))
+        window.contentMinSize = NSSize(width: 1040, height: 720)
         window.center()
         window.isReleasedWhenClosed = false
         window.delegate = self
