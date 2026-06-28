@@ -242,6 +242,8 @@ final class NativePrintService: @unchecked Sendable {
             hideTaoLogo: settings.hideTaoLogo,
             hideCourierPackage: settings.hideCourierPackage,
             hideBorder: settings.hideBorder,
+            itemInfoFontMM: CGFloat(settings.itemInfoFontMM),
+            memoFontMM: CGFloat(settings.memoFontMM),
             calibration: settings.calibration
         )
         return true
@@ -523,7 +525,7 @@ final class NativePrintService: @unchecked Sendable {
             "pending": .number(45),
             "rendering": .number(160),
         ]
-        let renderResult = renderWaybill(payload: payload, requestID: requestID, taskID: taskID, docs: docs, paperSize: PaperCatalog.match(media: config.printSettings.media), hideTaoLogo: config.printSettings.hideTaoLogo, hideCourierPackage: config.printSettings.hideCourierPackage, hideBorder: config.printSettings.hideBorder, calibration: config.printSettings.calibration)
+        let renderResult = renderWaybill(payload: payload, requestID: requestID, taskID: taskID, docs: docs, paperSize: PaperCatalog.match(media: config.printSettings.media), hideTaoLogo: config.printSettings.hideTaoLogo, hideCourierPackage: config.printSettings.hideCourierPackage, hideBorder: config.printSettings.hideBorder, itemInfoFontMM: CGFloat(config.printSettings.itemInfoFontMM), memoFontMM: CGFloat(config.printSettings.memoFontMM), calibration: config.printSettings.calibration)
         let previewURL = "http://localhost:\(config.httpPort)/file/\(renderResult.fileName)"
         var physicalPrintJob: PhysicalPrintJob?
 
@@ -692,9 +694,9 @@ final class NativePrintService: @unchecked Sendable {
         channel.writeAndFlush(frame, promise: nil)
     }
 
-    private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument], paperSize: PaperSize, hideTaoLogo: Bool, hideCourierPackage: Bool, hideBorder: Bool, calibration: PrinterCalibration) -> RenderResult {
+    private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument], paperSize: PaperSize, hideTaoLogo: Bool, hideCourierPackage: Bool, hideBorder: Bool, itemInfoFontMM: CGFloat, memoFontMM: CGFloat, calibration: PrinterCalibration) -> RenderResult {
         do {
-            let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, calibration: calibration)
+            let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM, calibration: calibration)
             lock.withLock {
                 // 清理同一 taskID 的旧校准变体，避免反复调校准时缓存与磁盘膨胀。
                 let prefix = safeFilename(taskID)
@@ -1123,11 +1125,11 @@ final class NativeWaybillRenderer: @unchecked Sendable {
     private let contentHeightMM: CGFloat = WaybillContentBox.heightMM
     private let mmToPoint: CGFloat = 72 / 25.4
 
-    func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String, paperSize: PaperSize = PaperCatalog.default, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false, hideBorder: Bool = false, calibration: PrinterCalibration = .identity) throws -> RenderResult {
+    func render(payload: [String: JSONValue], outputDirectory: URL, requestID: String, taskID: String, paperSize: PaperSize = PaperCatalog.default, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false, hideBorder: Bool = false, itemInfoFontMM: CGFloat = 3.2, memoFontMM: CGFloat = 2.5, calibration: PrinterCalibration = .identity) throws -> RenderResult {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        // 文件名随校准变化，使重烘焙产出新 URL，PDFView/latestPreviewPDF 才会刷新；
-        // 校准为默认值时保持纯 taskID 文件名（兼容既有断言与协议回放）。
-        let fileName = "\(safeFilename(taskID))\(Self.calibrationToken(calibration)).pdf"
+        // 文件名随校准与字号变化，使重烘焙产出新 URL，PDFView/latestPreviewPDF 才会刷新；
+        // 均为默认值时保持纯 taskID 文件名（兼容既有断言与协议回放）。
+        let fileName = "\(safeFilename(taskID))\(Self.calibrationToken(calibration))\(Self.fontToken(itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM)).pdf"
         let outputURL = outputDirectory.appendingPathComponent(fileName)
         let task = payload.object("task")
         let documents = task.array("documents").compactMap(\.objectValue)
@@ -1159,7 +1161,7 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             }
         } else {
             for (index, document) in documents.enumerated() {
-                drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, calibration: calibration)
+                drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM, calibration: calibration)
             }
         }
         context.closePDF()
@@ -1174,6 +1176,15 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         let oy = Int((calibration.offsetYMM * 10).rounded())
         let sc = Int((calibration.scaleRatio * 100).rounded())
         return "-cal\(ox)_\(oy)_\(calibration.rotationDegrees)_\(sc)_\(calibration.adaptivePaper ? "a" : "f")"
+    }
+
+    /// 字号的文件名后缀：与默认值（3.2 / 2.5mm）一致时返回空串，保持纯 taskID 文件名
+    /// （兼容协议回放与既有断言）；偏离默认时编码字号，确保调字号后 URL 变化、预览刷新。
+    static func fontToken(itemInfoFontMM: CGFloat, memoFontMM: CGFloat) -> String {
+        let item = Int((itemInfoFontMM * 10).rounded())
+        let memo = Int((memoFontMM * 10).rounded())
+        guard item != 32 || memo != 25 else { return "" }
+        return "-fnt\(item)_\(memo)"
     }
 
     /// 把 74×126mm 内容盒水平居中、顶部对齐放入纸张外框。
@@ -1227,7 +1238,7 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         return Data(text.utf8)
     }
 
-    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int, hideTaoLogo: Bool, hideCourierPackage: Bool, hideBorder: Bool, calibration: PrinterCalibration) {
+    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int, hideTaoLogo: Bool, hideCourierPackage: Bool, hideBorder: Bool, itemInfoFontMM: CGFloat, memoFontMM: CGFloat, calibration: PrinterCalibration) {
         drawPage(context: context, pageRect: pageRect, contentRect: contentRect, calibration: calibration) {
             let parts = splitContents(document)
             let decrypted = decryptWaybillContent(parts.standard)
@@ -1243,7 +1254,9 @@ final class NativeWaybillRenderer: @unchecked Sendable {
                 pageCount: count,
                 hideTaoLogo: hideTaoLogo,
                 hideCourierPackage: hideCourierPackage,
-                hideBorder: hideBorder
+                hideBorder: hideBorder,
+                itemInfoFontMM: itemInfoFontMM,
+                memoFontMM: memoFontMM
             )
         }
     }
@@ -1340,7 +1353,9 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         pageCount: Int,
         hideTaoLogo: Bool,
         hideCourierPackage: Bool,
-        hideBorder: Bool
+        hideBorder: Bool,
+        itemInfoFontMM: CGFloat,
+        memoFontMM: CGFloat
     ) {
         let values = buildTemplateValues(data: data, standard: standard, customData: customData, documentID: documentID, pageNumber: pageNumber, pageCount: pageCount)
         if !hideBorder {
@@ -1416,7 +1431,7 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             drawTemplateText(values.privacyNumber, x: 20.86, y: 45.3, width: 42.47, height: 4.81, size: 4.3, weight: .bold, valign: .middle)
         }
 
-        drawCustomArea(customData)
+        drawCustomArea(customData, itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM)
     }
 
     private func buildTemplateValues(
@@ -1478,18 +1493,36 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         return sender
     }
 
-    private func drawCustomArea(_ customData: [String: JSONValue]) {
+    private func drawCustomArea(_ customData: [String: JSONValue], itemInfoFontMM: CGFloat, memoFontMM: CGFloat) {
         let showItem = customData.bool("showItemInfo") ?? true
         let itemText = showItem ? customData.string("ITEM_INFO") : customData.string("PAGE_PRINT_TIPS")
-        let itemFontSize = min(4.2, max(2.6, (Double(customData.string("itemInfoFontSize")) ?? 10) * 0.32))
-        let contentX: CGFloat = 5.4
-        let contentWidth: CGFloat = 53.2
-        drawTemplateText(itemText, x: contentX, y: 76.6, width: 62, height: 7.4, size: itemFontSize, weight: .bold, wrap: true)
-        drawTemplateText(customData.string("SELLER_MEMO"), x: contentX, y: 85.0, width: contentWidth, height: 7.0, size: 2.5, wrap: true)
-        drawTemplateText(customData.string("BUYER_MEMO"), x: contentX, y: 92.8, width: contentWidth, height: 7.0, size: 2.5, wrap: true)
+        // 自定义区从 y≈76.6mm 起向下流式排布，充分利用底部留白：
+        // 字段按实际文字高度依次下移，大字号可多行完整显示，不再被固定窄框压住。
+        // 商品信息字号由全局偏好决定，始终覆盖 payload 的 itemInfoFontSize。
+        let topY: CGFloat = 76.6
+        let bottomY: CGFloat = 124          // 内容盒高 126mm，底部留约 2mm 余量
+        let gap: CGFloat = 1.2              // 字段间距
+        let leftX: CGFloat = 5.4
+        // 统一列宽，避开右下角「商品数量」列（x=58.8），任意纵向高度都不会与之重叠。
+        let colWidth: CGFloat = 53.2
+
+        var cursorY = topY
+        func flow(_ text: String, size: CGFloat, weight: NSFont.Weight) {
+            guard !text.isEmpty, cursorY < bottomY else { return }
+            let available = bottomY - cursorY
+            let used = drawTemplateText(text, x: leftX, y: cursorY, width: colWidth, height: available, size: size, weight: weight, wrap: true)
+            cursorY += used + gap
+        }
+
+        flow(itemText, size: itemInfoFontMM, weight: .bold)
+        flow(customData.string("SELLER_MEMO"), size: memoFontMM, weight: .regular)
+        flow(customData.string("BUYER_MEMO"), size: memoFontMM, weight: .regular)
+
+        // 商品数量固定在右下角，独立于左侧流式文本列。
         drawTemplateText(customData.string("ITEM_TOTAL_COUNT"), x: 58.8, y: 97, width: 10.6, height: 9, size: 6.8, weight: .bold, fill: .darkGray, align: .center, valign: .middle)
     }
 
+    @discardableResult
     private func drawTemplateText(
         _ value: String,
         x: CGFloat,
@@ -1503,13 +1536,13 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         align: TextAlign = .left,
         valign: VerticalAlign = .top,
         wrap: Bool = false
-    ) {
+    ) -> CGFloat {
         let rect = mmRect(x: x, y: y, width: width, height: height)
         if let background {
             background.setFill()
             rect.fill()
         }
-        guard !value.isEmpty else { return }
+        guard !value.isEmpty else { return 0 }
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = align.nsAlignment
         paragraph.lineBreakMode = wrap ? .byWordWrapping : .byTruncatingTail
@@ -1535,6 +1568,8 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             drawY = rect.maxY - drawHeight
         }
         attributed.draw(with: CGRect(x: rect.minX, y: drawY, width: rect.width, height: drawHeight), options: [.usesLineFragmentOrigin, .usesFontLeading])
+        // 返回内容实际占用的毫米高度（受框高 height 限制），供流式布局测量下一字段起点。
+        return min(height, measured.height / mmToPoint)
     }
 
     private func drawRotatedTemplateText(_ value: String, x: CGFloat, y: CGFloat, angle: CGFloat, size: CGFloat) {

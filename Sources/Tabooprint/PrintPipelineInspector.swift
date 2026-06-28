@@ -134,6 +134,9 @@ struct LabelContentCard: View {
     @Binding var hideCourierPackage: Bool
     @Binding var hideBorder: Bool
 
+    @AppStorage(SettingsKeys.fontSizeItemInfoMM) private var itemInfoFontMM = 3.2
+    @AppStorage(SettingsKeys.fontSizeMemoMM) private var memoFontMM = 2.5
+
     var body: some View {
         SettingsCard(title: "面单内容", subtitle: "选择是否打印这些标记。") {
             VStack(alignment: .leading, spacing: 12) {
@@ -145,6 +148,14 @@ struct LabelContentCard: View {
 
                 Toggle("不打印面单外边框", isOn: $hideBorder)
                     .onChange(of: hideBorder) { _ in model.rebakePreviewNow() }
+
+                Stepper("商品信息字号：\(itemInfoFontMM, specifier: "%.1f") mm",
+                        value: $itemInfoFontMM, in: 2.0...10.0, step: 0.1)
+                    .onChange(of: itemInfoFontMM) { _ in model.rebakePreviewNow() }
+
+                Stepper("卖家/买家备注字号：\(memoFontMM, specifier: "%.1f") mm",
+                        value: $memoFontMM, in: 1.5...10.0, step: 0.1)
+                    .onChange(of: memoFontMM) { _ in model.rebakePreviewNow() }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

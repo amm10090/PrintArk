@@ -16,6 +16,8 @@ enum SettingsKeys {
     static let printHideBorder = "tabooprint.printHideBorder"
     static let printFlip = "tabooprint.printFlip"
     static let printerCalibrations = "tabooprint.printerCalibrations"
+    static let fontSizeItemInfoMM = "tabooprint.fontSizeItemInfoMM"
+    static let fontSizeMemoMM = "tabooprint.fontSizeMemoMM"
 }
 
 enum RuntimeMode: String, CaseIterable, Identifiable {
@@ -167,6 +169,9 @@ struct PrintSettings {
     var hideCourierPackage: Bool = false
     var hideBorder: Bool = false
     var flipPrint: Bool = false
+    // 面单字段字号（mm），全局偏好，预览与物理打印同源生效。
+    var itemInfoFontMM: Double = 3.2
+    var memoFontMM: Double = 2.5
     // 按打印机校准（由 resolvedPrintSettings() 从 AppModel.printerCalibrations 注入，不读扁平键）。
     var offsetXMM: Double = 0
     var offsetYMM: Double = 0
@@ -191,6 +196,8 @@ struct PrintSettings {
         let hideCourierPackage = defaults.object(forKey: SettingsKeys.printHideCourierPackage) as? Bool ?? false
         let hideBorder = defaults.object(forKey: SettingsKeys.printHideBorder) as? Bool ?? false
         let flipPrint = defaults.object(forKey: SettingsKeys.printFlip) as? Bool ?? false
+        let itemInfoFontMM = defaults.object(forKey: SettingsKeys.fontSizeItemInfoMM) as? Double ?? 3.2
+        let memoFontMM = defaults.object(forKey: SettingsKeys.fontSizeMemoMM) as? Double ?? 2.5
         return PrintSettings(
             printerName: printerName.isEmpty ? "TAOBAO" : printerName,
             media: media,
@@ -201,7 +208,9 @@ struct PrintSettings {
             hideTaoLogo: hideTaoLogo,
             hideCourierPackage: hideCourierPackage,
             hideBorder: hideBorder,
-            flipPrint: flipPrint
+            flipPrint: flipPrint,
+            itemInfoFontMM: itemInfoFontMM,
+            memoFontMM: memoFontMM
         )
     }
 }
