@@ -92,6 +92,11 @@ case "$MODE" in
   run)
     open_app
     ;;
+  build|--build)
+    # 仅打包不运行:.app bundle 已在 case 之前构建完成,这里直接退出。
+    # 供 CI 产出 artifact,避免在无头环境 open_app 启动 GUI。
+    echo "$DISPLAY_NAME ($APP_NAME) bundle built at $APP_BUNDLE"
+    ;;
   --debug|debug)
     lldb -- "$APP_BINARY"
     ;;
