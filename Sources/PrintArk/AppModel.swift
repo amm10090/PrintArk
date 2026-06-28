@@ -2,22 +2,62 @@ import AppKit
 import Foundation
 
 enum SettingsKeys {
-    static let runtimeMode = "tabooprint.runtimeMode"
-    static let debugPreview = "tabooprint.debugPreview"
-    static let autoOpenPreview = "tabooprint.autoOpenPreview"
-    static let printerName = "tabooprint.printerName"
-    static let printMedia = "tabooprint.printMedia"
-    static let printDryRun = "tabooprint.printDryRun"
-    static let printFitToPage = "tabooprint.printFitToPage"
-    static let printDedupe = "tabooprint.printDedupe"
-    static let dedupeWindowMinutes = "tabooprint.dedupeWindowMinutes"
-    static let printHideTaoLogo = "tabooprint.printHideTaoLogo"
-    static let printHideCourierPackage = "tabooprint.printHideCourierPackage"
-    static let printHideBorder = "tabooprint.printHideBorder"
-    static let printFlip = "tabooprint.printFlip"
-    static let printerCalibrations = "tabooprint.printerCalibrations"
-    static let fontSizeItemInfoMM = "tabooprint.fontSizeItemInfoMM"
-    static let fontSizeMemoMM = "tabooprint.fontSizeMemoMM"
+    static let runtimeMode = "printark.runtimeMode"
+    static let debugPreview = "printark.debugPreview"
+    static let autoOpenPreview = "printark.autoOpenPreview"
+    static let printerName = "printark.printerName"
+    static let printMedia = "printark.printMedia"
+    static let printDryRun = "printark.printDryRun"
+    static let printFitToPage = "printark.printFitToPage"
+    static let printDedupe = "printark.printDedupe"
+    static let dedupeWindowMinutes = "printark.dedupeWindowMinutes"
+    static let printHideTaoLogo = "printark.printHideTaoLogo"
+    static let printHideCourierPackage = "printark.printHideCourierPackage"
+    static let printHideBorder = "printark.printHideBorder"
+    static let printFlip = "printark.printFlip"
+    static let printerCalibrations = "printark.printerCalibrations"
+    static let fontSizeItemInfoMM = "printark.fontSizeItemInfoMM"
+    static let fontSizeMemoMM = "printark.fontSizeMemoMM"
+}
+
+/// UserDefaults 键迁移：产品标识从 `Tabooprint` 改名 `PrintArk` 后，
+/// 旧用户的设置存在 `tabooprint.*` 键下，新代码读 `printark.*`，需一次性搬迁
+/// 避免现有设置（含 v1.0.0 实测的字号 3.5/5.5、纸张 74×126 等）回退出厂默认。
+///
+/// 必须在 `FactoryDefaults.register()` **之前**调用：迁移值要优先于注册默认值，
+/// 而 register(defaults:) 只填未设置的键，因此「先迁移 → 再注册」既保住旧值
+/// 又不覆盖用户显式值。
+enum SettingsMigration {
+    /// 旧 → 新键映射（含全部扁平键与 `printerCalibrations` JSON 整表键）。
+    private static let keyMap: [(old: String, new: String)] = [
+        ("tabooprint.runtimeMode", SettingsKeys.runtimeMode),
+        ("tabooprint.debugPreview", SettingsKeys.debugPreview),
+        ("tabooprint.autoOpenPreview", SettingsKeys.autoOpenPreview),
+        ("tabooprint.printerName", SettingsKeys.printerName),
+        ("tabooprint.printMedia", SettingsKeys.printMedia),
+        ("tabooprint.printDryRun", SettingsKeys.printDryRun),
+        ("tabooprint.printFitToPage", SettingsKeys.printFitToPage),
+        ("tabooprint.printDedupe", SettingsKeys.printDedupe),
+        ("tabooprint.dedupeWindowMinutes", SettingsKeys.dedupeWindowMinutes),
+        ("tabooprint.printHideTaoLogo", SettingsKeys.printHideTaoLogo),
+        ("tabooprint.printHideCourierPackage", SettingsKeys.printHideCourierPackage),
+        ("tabooprint.printHideBorder", SettingsKeys.printHideBorder),
+        ("tabooprint.printFlip", SettingsKeys.printFlip),
+        ("tabooprint.printerCalibrations", SettingsKeys.printerCalibrations),
+        ("tabooprint.fontSizeItemInfoMM", SettingsKeys.fontSizeItemInfoMM),
+        ("tabooprint.fontSizeMemoMM", SettingsKeys.fontSizeMemoMM),
+    ]
+
+    /// 幂等迁移：仅当新键无值且旧键有值时拷贝。新键一旦有值（已迁移或用户改过）
+    /// 就不再覆盖，多次启动安全。保留旧键不删，便于回滚到旧版本时设置仍在。
+    static func migrateLegacyKeysIfNeeded() {
+        let defaults = UserDefaults.standard
+        for (old, new) in keyMap where defaults.object(forKey: new) == nil {
+            if let value = defaults.object(forKey: old) {
+                defaults.set(value, forKey: new)
+            }
+        }
+    }
 }
 
 /// App 版本号单一数据源。版本页与日志引用此常量；

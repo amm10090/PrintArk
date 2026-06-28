@@ -82,7 +82,7 @@ final class NativePrintService: @unchecked Sendable {
     private var lastError = ""
     private let renderer = NativeWaybillRenderer()
     private let renderedDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
-        .appendingPathComponent("tabooprint", isDirectory: true)
+        .appendingPathComponent("printark", isDirectory: true)
         .appendingPathComponent("waybills", isDirectory: true)
 
     var latestPreviewPDF: URL? {
@@ -843,7 +843,7 @@ final class NativePrintService: @unchecked Sendable {
             process.waitUntilExit()
             if process.terminationStatus != 0 {
                 let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                throw NSError(domain: "Tabooprint", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr.isEmpty ? "lpr failed" : stderr])
+                throw NSError(domain: "PrintArk", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr.isEmpty ? "lpr failed" : stderr])
             }
             emit("print-job", [
                 "phase": .string("\(phasePrefix)submitted"),
@@ -1150,12 +1150,12 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         }
         guard let consumer = CGDataConsumer(url: outputURL as CFURL),
               let context = CGContext(consumer: consumer, mediaBox: &pageRect, nil) else {
-            throw NSError(domain: "Tabooprint", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot create PDF"])
+            throw NSError(domain: "PrintArk", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot create PDF"])
         }
 
         if documents.isEmpty {
             drawPage(context: context, pageRect: pageRect, contentRect: contentRect, calibration: calibration) {
-                drawText("Tabooprint 空任务", at: CGPoint(x: 18, y: 32), size: 16, weight: .bold)
+                drawText("PrintArk 空任务", at: CGPoint(x: 18, y: 32), size: 16, weight: .bold)
                 drawText("requestID: \(requestID)", at: CGPoint(x: 18, y: 62), size: 8, weight: .regular)
                 drawText("taskID: \(taskID)", at: CGPoint(x: 18, y: 76), size: 8, weight: .regular)
             }
@@ -1852,7 +1852,7 @@ private func safeFilename(_ value: String) -> String {
     let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
     let scalars = value.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
     let text = String(scalars)
-    return text.isEmpty ? "tabooprint_\(millisecondsNow())" : text
+    return text.isEmpty ? "printark_\(millisecondsNow())" : text
 }
 
 /// 中文 lpstat 把打印机名与状态词连写（如「TAOBAO闲置」）。此函数剥掉分隔符及状态后缀，
@@ -1989,7 +1989,7 @@ private func strokeLine(y: CGFloat, pageRect: CGRect) {
 
 private func drawBarcode(code: String, rect: CGRect) {
     NSColor.black.setFill()
-    let chars = Array(code.isEmpty ? "TABOOPRINT" : code)
+    let chars = Array(code.isEmpty ? "PRINTARK" : code)
     let unit = rect.width / CGFloat(max(chars.count * 3, 1))
     var x = rect.minX
     for (index, char) in chars.enumerated() {

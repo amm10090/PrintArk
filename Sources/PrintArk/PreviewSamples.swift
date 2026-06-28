@@ -36,7 +36,7 @@ extension ServiceState {
 @MainActor
 enum PreviewSamples {
     static var previewDefaults: UserDefaults {
-        let defaults = UserDefaults(suiteName: "Tabooprint.Previews") ?? .standard
+        let defaults = UserDefaults(suiteName: "PrintArk.Previews") ?? .standard
         defaults.set("TAOBAO", forKey: SettingsKeys.printerName)
         defaults.set("100x180mm", forKey: SettingsKeys.printMedia)
         defaults.set(true, forKey: SettingsKeys.printFitToPage)

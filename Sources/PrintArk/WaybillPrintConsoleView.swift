@@ -115,7 +115,7 @@ struct PrintWorkspaceContent: View {
         case .currentVersion:
             SidebarPage(
                 title: "当前版本",
-                subtitle: "Tabooprint 本地运行信息。",
+                subtitle: "PrintArk 本地运行信息。",
                 systemImage: "info.circle"
             ) {
                 VersionSummaryCard(model: model)

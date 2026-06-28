@@ -1,4 +1,4 @@
-# Tabooprint
+# PrintArk
 
 macOS native MVP for the Cainiao / Taobao print mock. The app now runs the local print replacement service directly in Swift: WebSocket on `13528`, HTTP preview PDFs on `13525`, task history, redacted logs, dry-run printing, and duplicate protection all live inside the native runtime.
 
@@ -19,7 +19,7 @@ macOS native MVP for the Cainiao / Taobao print mock. The app now runs the local
 
 ```bash
 rtk swift build
-rtk .build/debug/Tabooprint --service-only --auto-open-preview false
+rtk .build/debug/PrintArk --service-only --auto-open-preview false
 ```
 
 Launch the built app from Xcode or the generated SwiftPM product for the menu bar UI. Use `--service-only` for protocol replay and command-line verification.
@@ -28,10 +28,10 @@ Launch the built app from Xcode or the generated SwiftPM product for the menu ba
 
 The package now exposes:
 
-- executable product `Tabooprint`
-- library product `TabooprintKit`
+- executable product `PrintArk`
+- library product `PrintArkKit`
 
-If Xcode refuses to preview SwiftUI views from the executable product, use the library-backed preview/build boundary from `TabooprintKit`. The service binary and command-line smoke tests still run through `Tabooprint`.
+If Xcode refuses to preview SwiftUI views from the executable product, use the library-backed preview/build boundary from `PrintArkKit`. The service binary and command-line smoke tests still run through `PrintArk`.
 
 ## Notes
 
@@ -89,14 +89,14 @@ Tabooprint/
 
 ```bash
 cd /Users/amo/project/Tabooprint
-rtk .build/debug/Tabooprint --service-only --auto-open-preview false
+rtk .build/debug/PrintArk --service-only --auto-open-preview false
 rtk python3 scripts/replay_13528_preview.py
 ```
 
 `preview=false` 需要以尊重 preview 标记的模式启动：
 
 ```bash
-rtk .build/debug/Tabooprint --service-only --auto-open-preview false --force-preview false --print-dry-run true
+rtk .build/debug/PrintArk --service-only --auto-open-preview false --force-preview false --print-dry-run true
 rtk python3 scripts/replay_13528_preview.py --case preview-false
 rtk python3 scripts/replay_13528_preview.py --case empty-documents
 ```
@@ -104,7 +104,7 @@ rtk python3 scripts/replay_13528_preview.py --case empty-documents
 解密失败模式：
 
 ```bash
-rtk .build/debug/Tabooprint --service-only --auto-open-preview false --fail decrypt
+rtk .build/debug/PrintArk --service-only --auto-open-preview false --fail decrypt
 rtk python3 scripts/replay_13528_preview.py --case decrypt-failure
 ```
 
@@ -119,30 +119,30 @@ rtk python3 scripts/replay_13528_preview.py --case decrypt-failure
 `preview=false` 可以进入 macOS 打印路径。默认是 dry-run，只记录即将执行的 `lpr` 命令，不会真实打印：
 
 ```bash
-rtk .build/debug/Tabooprint --service-only --force-preview false --printer-name TAOBAO --print-media 100x180mm --print-dry-run true
+rtk .build/debug/PrintArk --service-only --force-preview false --printer-name TAOBAO --print-media 100x180mm --print-dry-run true
 ```
 
 真实打印必须显式关闭 dry-run：
 
 ```bash
-rtk .build/debug/Tabooprint --service-only --force-preview false --printer-name TAOBAO --print-media 100x180mm --print-dry-run false
+rtk .build/debug/PrintArk --service-only --force-preview false --printer-name TAOBAO --print-media 100x180mm --print-dry-run false
 ```
 
 物理打印默认启用 10 分钟任务去重。服务会按打印机、纸张参数、documentID 和面单内容指纹识别重复任务；命中重复时跳过第二次 `lpr`，但仍向千牛返回成功流程，避免页面卡住。需要强制重打时可以重启服务、等待去重窗口过期，或显式关闭：
 
 ```bash
-rtk .build/debug/Tabooprint --service-only --force-preview false --printer-name TAOBAO --print-dry-run false --print-dedupe false
+rtk .build/debug/PrintArk --service-only --force-preview false --printer-name TAOBAO --print-dry-run false --print-dedupe false
 ```
 
 也可以调整窗口：
 
 ```bash
-rtk .build/debug/Tabooprint --service-only --force-preview false --printer-name TAOBAO --print-dry-run false --dedupe-window-ms 60000
+rtk .build/debug/PrintArk --service-only --force-preview false --printer-name TAOBAO --print-dry-run false --dedupe-window-ms 60000
 ```
 
 ### 已验证打印机：AiYin QR-368（TSPL）
 
-实测可正常出纸的热敏机为 **AiYin QR-368**，其 CUPS PPD 的 `Personality` 为 `tspl`（TSPL 指令集）。Tabooprint 始终送出 **PDF**，由 CUPS 队列内置的 PostScript→TSPL 过滤链转换为打印机可识别的指令，因此不需要应用侧关心 TSPL。
+实测可正常出纸的热敏机为 **AiYin QR-368**，其 CUPS PPD 的 `Personality` 为 `tspl`（TSPL 指令集）。PrintArk 始终送出 **PDF**，由 CUPS 队列内置的 PostScript→TSPL 过滤链转换为打印机可识别的指令，因此不需要应用侧关心 TSPL。
 
 排障要点（基于一次真实定位）：
 

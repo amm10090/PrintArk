@@ -2,9 +2,9 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-# BINARY_NAME 是 SwiftPM 产物/可执行名（内部标识，保持不变）；
+# BINARY_NAME 是 SwiftPM 产物/可执行名（内部标识，跟随 Package executable 名）；
 # APP_NAME 是 .app bundle 文件名（程序名）；DISPLAY_NAME 是用户可见显示名。
-BINARY_NAME="Tabooprint"
+BINARY_NAME="PrintArk"
 APP_NAME="PrintArk"
 DISPLAY_NAME="印舟"
 BUNDLE_ID="local.printark.app"

@@ -3,18 +3,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "Tabooprint",
+    name: "PrintArk",
     platforms: [
         .macOS(.v13),
     ],
     products: [
         .library(
-            name: "TabooprintKit",
-            targets: ["Tabooprint"]
+            name: "PrintArkKit",
+            targets: ["PrintArk"]
         ),
         .executable(
-            name: "Tabooprint",
-            targets: ["TabooprintApp"]
+            name: "PrintArk",
+            targets: ["PrintArkApp"]
         ),
     ],
     dependencies: [
@@ -23,7 +23,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "Tabooprint",
+            name: "PrintArk",
             dependencies: [
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -36,15 +36,15 @@ let package = Package(
             ],
         ),
         .executableTarget(
-            name: "TabooprintApp",
-            dependencies: ["Tabooprint"],
+            name: "PrintArkApp",
+            dependencies: ["PrintArk"],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ]
         ),
         .testTarget(
-            name: "TabooprintTests",
-            dependencies: ["Tabooprint"],
+            name: "PrintArkTests",
+            dependencies: ["PrintArk"],
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],

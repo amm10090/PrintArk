@@ -1,7 +1,7 @@
 import XCTest
-@testable import Tabooprint
+@testable import PrintArk
 
-final class TabooprintTests: XCTestCase {
+final class PrintArkTests: XCTestCase {
     func testRuntimeModeMapsToNativeConfiguration() {
         let settings = PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10)
         let preview = PrintServiceConfiguration.current(runtimeMode: .defaultPreview, autoOpenPreview: false, printSettings: settings)
@@ -202,7 +202,7 @@ final class TabooprintTests: XCTestCase {
         let service = NativePrintService()
         service.updateConfiguration(PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10))
 
-        let job = service.retryPhysicalPrint(requestID: "RID-MISSING", pdfPath: "/tmp/tabooprint/does-not-exist-\(UUID().uuidString).pdf", printerName: "TAOBAO")
+        let job = service.retryPhysicalPrint(requestID: "RID-MISSING", pdfPath: "/tmp/printark/does-not-exist-\(UUID().uuidString).pdf", printerName: "TAOBAO")
 
         XCTAssertFalse(job.ok)
         XCTAssertNotNil(job.error)
@@ -262,7 +262,7 @@ final class TabooprintTests: XCTestCase {
     func testNativeRendererWritesPDF() throws {
         let renderer = NativeWaybillRenderer()
         let outputDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("printark-tests-\(UUID().uuidString)", isDirectory: true)
         let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
         let result = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "TASK")
         let data = try Data(contentsOf: result.url)
@@ -283,7 +283,7 @@ final class TabooprintTests: XCTestCase {
 
         let renderer = NativeWaybillRenderer()
         let outputDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("printark-tests-\(UUID().uuidString)", isDirectory: true)
         let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
 
         let plain = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "TASK")
@@ -300,7 +300,7 @@ final class TabooprintTests: XCTestCase {
     func testNativeRendererUsesNativeContentBoxForMatchingPaper() throws {
         let renderer = NativeWaybillRenderer()
         let outputDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("printark-tests-\(UUID().uuidString)", isDirectory: true)
         let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
         let result = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "NATIVE", paperSize: PaperCatalog.match(media: "74x126mm"))
         let document = try XCTUnwrap(CGPDFDocument(result.url as CFURL))
@@ -315,7 +315,7 @@ final class TabooprintTests: XCTestCase {
     func testNativeRendererPaperSizeDrivesMediaBox() throws {
         let renderer = NativeWaybillRenderer()
         let outputDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("printark-tests-\(UUID().uuidString)", isDirectory: true)
         let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
         let result = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "A4", paperSize: PaperCatalog.match(media: "A4"))
         let document = try XCTUnwrap(CGPDFDocument(result.url as CFURL))
@@ -329,7 +329,7 @@ final class TabooprintTests: XCTestCase {
     func testAdaptivePaperSizesMediaBoxToContentFootprint() throws {
         let renderer = NativeWaybillRenderer()
         let outputDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("printark-tests-\(UUID().uuidString)", isDirectory: true)
         let payload = try XCTUnwrap(JSONValue.parse(samplePrintPayload()).objectValue)
 
         func mediaBox(_ cal: PrinterCalibration, _ taskID: String) throws -> CGRect {
@@ -532,7 +532,7 @@ final class TabooprintTests: XCTestCase {
 
     func testPhysicalDedupeAndLprArgsAreStable() throws {
         let settings = PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10)
-        let pdfURL = URL(fileURLWithPath: "/tmp/tabooprint/waybills/TASK.pdf")
+        let pdfURL = URL(fileURLWithPath: "/tmp/printark/waybills/TASK.pdf")
         let docs = [
             ProtocolDocument(documentId: "DOC1", fingerprint: "FP1", index: 0),
             ProtocolDocument(documentId: "DOC2", fingerprint: "FP2", index: 1),
@@ -542,7 +542,7 @@ final class TabooprintTests: XCTestCase {
             "-P", "TAOBAO",
             "-o", "media=100x180mm",
             "-o", "fit-to-page",
-            "/tmp/tabooprint/waybills/TASK.pdf",
+            "/tmp/printark/waybills/TASK.pdf",
         ])
         XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|noflip|offX:0.000|offY:0.000|rot:0|scale:1.000|fixed|DOC1,DOC2|FP1,FP2")
     }
@@ -572,7 +572,7 @@ final class TabooprintTests: XCTestCase {
 
     func testFlipPrintAddsOrientationArgAndDedupeKey() throws {
         let settings = PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10, flipPrint: true)
-        let pdfURL = URL(fileURLWithPath: "/tmp/tabooprint/waybills/TASK.pdf")
+        let pdfURL = URL(fileURLWithPath: "/tmp/printark/waybills/TASK.pdf")
         let docs = [ProtocolDocument(documentId: "DOC1", fingerprint: "FP1", index: 0)]
 
         // 反转通过 PDF 层 180° 旋转实现（见 makeRotatedPDFForPrinting），不再向 lpr 注入旋转选项，
@@ -581,7 +581,7 @@ final class TabooprintTests: XCTestCase {
             "-P", "TAOBAO",
             "-o", "media=100x180mm",
             "-o", "fit-to-page",
-            "/tmp/tabooprint/waybills/TASK.pdf",
+            "/tmp/printark/waybills/TASK.pdf",
         ])
         XCTAssertEqual(buildPhysicalPrintDedupeKey(printerName: "TAOBAO", docs: docs, settings: settings), "physical|TAOBAO|100x180mm|fit|flip|offX:0.000|offY:0.000|rot:0|scale:1.000|fixed|DOC1|FP1")
     }
@@ -612,7 +612,7 @@ final class TabooprintTests: XCTestCase {
     func testRendererHandlesBadEncryptedDataAndFallbackPDF() throws {
         let renderer = NativeWaybillRenderer()
         let outputDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("printark-tests-\(UUID().uuidString)", isDirectory: true)
         let payload = try XCTUnwrap(JSONValue.parse(sampleBadEncryptedPrintPayload()).objectValue)
         let result = try renderer.render(payload: payload, outputDirectory: outputDir, requestID: "RID", taskID: "BAD_AES")
         let rendered = try Data(contentsOf: result.url)
@@ -625,7 +625,7 @@ final class TabooprintTests: XCTestCase {
 
     func testWaybillPreviewSamplePDFUsesNativeRenderer() throws {
         let outputDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tabooprint-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("printark-tests-\(UUID().uuidString)", isDirectory: true)
         let url = try WaybillPreviewSamplePDF.writeSample(to: outputDir)
         let data = try Data(contentsOf: url)
         let document = try XCTUnwrap(CGPDFDocument(url as CFURL))
@@ -771,7 +771,7 @@ private final class LockedResultBox: @unchecked Sendable {
     func load() -> Result<(Data, URLResponse), Error> {
         lock.lock()
         defer { lock.unlock() }
-        return result ?? .failure(NSError(domain: "TabooprintTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "missing URLSession result"]))
+        return result ?? .failure(NSError(domain: "PrintArkTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "missing URLSession result"]))
     }
 }
 
@@ -784,7 +784,7 @@ private final class TestWebSocketClient {
         var outputStream: OutputStream?
         Stream.getStreamsToHost(withName: "127.0.0.1", port: port, inputStream: &inputStream, outputStream: &outputStream)
         guard let inputStream, let outputStream else {
-            throw NSError(domain: "TabooprintTests", code: 10, userInfo: [NSLocalizedDescriptionKey: "cannot create streams"])
+            throw NSError(domain: "PrintArkTests", code: 10, userInfo: [NSLocalizedDescriptionKey: "cannot create streams"])
         }
         input = inputStream
         output = outputStream
@@ -804,7 +804,7 @@ private final class TestWebSocketClient {
             frame.append(UInt8((length >> 8) & 0xff))
             frame.append(UInt8(length & 0xff))
         } else {
-            throw NSError(domain: "TabooprintTests", code: 11, userInfo: [NSLocalizedDescriptionKey: "test frame too large"])
+            throw NSError(domain: "PrintArkTests", code: 11, userInfo: [NSLocalizedDescriptionKey: "test frame too large"])
         }
         let mask = [UInt8](repeating: 0x37, count: 4)
         frame.append(contentsOf: mask)
@@ -824,11 +824,11 @@ private final class TestWebSocketClient {
             let bytes = try read(count: 2)
             length = Int(bytes[0]) << 8 | Int(bytes[1])
         } else if length == 127 {
-            throw NSError(domain: "TabooprintTests", code: 12, userInfo: [NSLocalizedDescriptionKey: "large frames unsupported in test client"])
+            throw NSError(domain: "PrintArkTests", code: 12, userInfo: [NSLocalizedDescriptionKey: "large frames unsupported in test client"])
         }
         let payload = try read(count: length)
         guard opcode == 0x1 else {
-            throw NSError(domain: "TabooprintTests", code: 13, userInfo: [NSLocalizedDescriptionKey: "unexpected opcode \(opcode)"])
+            throw NSError(domain: "PrintArkTests", code: 13, userInfo: [NSLocalizedDescriptionKey: "unexpected opcode \(opcode)"])
         }
         let object = try JSONSerialization.jsonObject(with: Data(payload), options: [])
         return try XCTUnwrap(object as? [String: Any])
@@ -854,7 +854,7 @@ private final class TestWebSocketClient {
         try write(Data(request.utf8))
         let response = try readUntilHeadersEnd()
         guard String(data: response, encoding: .utf8)?.contains("101 Switching Protocols") == true else {
-            throw NSError(domain: "TabooprintTests", code: 14, userInfo: [NSLocalizedDescriptionKey: "websocket handshake failed"])
+            throw NSError(domain: "PrintArkTests", code: 14, userInfo: [NSLocalizedDescriptionKey: "websocket handshake failed"])
         }
     }
 
@@ -865,7 +865,7 @@ private final class TestWebSocketClient {
             while sent < data.count {
                 let written = output.write(base.advanced(by: sent), maxLength: data.count - sent)
                 if written <= 0 {
-                    throw NSError(domain: "TabooprintTests", code: 15, userInfo: [NSLocalizedDescriptionKey: "stream write failed"])
+                    throw NSError(domain: "PrintArkTests", code: 15, userInfo: [NSLocalizedDescriptionKey: "stream write failed"])
                 }
                 sent += written
             }
@@ -879,7 +879,7 @@ private final class TestWebSocketClient {
             var buffer = [UInt8](repeating: 0, count: count - bytes.count)
             let read = input.read(&buffer, maxLength: buffer.count)
             if read <= 0 {
-                throw NSError(domain: "TabooprintTests", code: 16, userInfo: [NSLocalizedDescriptionKey: "stream read failed"])
+                throw NSError(domain: "PrintArkTests", code: 16, userInfo: [NSLocalizedDescriptionKey: "stream read failed"])
             }
             bytes.append(contentsOf: buffer.prefix(read))
         }

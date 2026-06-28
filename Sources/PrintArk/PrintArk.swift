@@ -3,8 +3,12 @@ import Darwin
 import SwiftUI
 
 @MainActor
-package enum TabooprintDesktopLauncher {
+package enum PrintArkDesktopLauncher {
     package static func main() {
+        // 旧版（Tabooprint）键迁移必须在注册默认与任何 UserDefaults 读取之前，
+        // 保证旧用户的设置先搬到新 printark.* 键，再注册出厂默认（不覆盖已迁移值）。
+        SettingsMigration.migrateLegacyKeysIfNeeded()
+
         // 出厂默认设置注册必须在任何 UserDefaults 读取之前；headless 与 GUI 两条路径都经过此点。
         FactoryDefaults.register()
 
@@ -24,7 +28,7 @@ package enum TabooprintDesktopLauncher {
     private static func configureDesktopRuntime() {
         NSWindow.allowsAutomaticWindowTabbing = false
 
-        guard ProcessInfo.processInfo.environment["TABOOPRINT_SHOW_SYSTEM_STDERR"] != "1" else {
+        guard ProcessInfo.processInfo.environment["PRINTARK_SHOW_SYSTEM_STDERR"] != "1" else {
             return
         }
         freopen("/dev/null", "w", stderr)

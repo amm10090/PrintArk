@@ -57,7 +57,7 @@ struct LabelPreviewWorkspace: View {
 
     private static let placeholderSampleURL: URL = {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tabooprint-placeholder.pdf")
+            .appendingPathComponent("printark-placeholder.pdf")
         let w: CGFloat = 370, h: CGFloat = 630
         var mediaBox = CGRect(x: 0, y: 0, width: w, height: h)
         if let ctx = CGContext(url as CFURL, mediaBox: &mediaBox, nil) {
@@ -150,9 +150,9 @@ enum WaybillPreviewLayout {
 
 enum WaybillPreviewSamplePDF {
     private static let requestID = "SAMPLE_PREVIEW"
-    private static let taskID = "tabooprint-sample"
+    private static let taskID = "printark-sample"
     private static let sampleDirectory = FileManager.default.temporaryDirectory
-        .appendingPathComponent("tabooprint", isDirectory: true)
+        .appendingPathComponent("printark", isDirectory: true)
         .appendingPathComponent("preview-samples", isDirectory: true)
 
     static func writeSample(to outputDirectory: URL = sampleDirectory, hideTaoLogo: Bool = false, hideCourierPackage: Bool = false, hideBorder: Bool = false, paperSize: PaperSize = PaperCatalog.default, calibration: PrinterCalibration = .identity) throws -> URL {
