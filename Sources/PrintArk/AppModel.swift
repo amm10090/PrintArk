@@ -18,6 +18,8 @@ enum SettingsKeys {
     static let printerCalibrations = "printark.printerCalibrations"
     static let fontSizeItemInfoMM = "printark.fontSizeItemInfoMM"
     static let fontSizeMemoMM = "printark.fontSizeMemoMM"
+    /// 菜单栏弹窗中已被用户隐藏（删除/清空已完成）的 QueueJob.id 集合，持久化以避免重启后“复活”。
+    static let dismissedJobIDs = "printark.dismissedJobIDs"
 }
 
 /// UserDefaults 键迁移：产品标识从 `Tabooprint` 改名 `PrintArk` 后，
@@ -64,7 +66,7 @@ enum SettingsMigration {
 /// build 脚本的 Info.plist（CFBundleShortVersionString）需人工对齐同一字面。
 /// 注意：协议伪装字段（getAgentInfo 的 "1.5.3.0"）不是 App 版本，与此无关。
 enum AppInfo {
-    static let version = "1.0.0"
+    static let version = "1.1.0"
 
     /// 构建日期（本地化短日期）。以可执行文件的修改时间作为编译期代理——
     /// `.app` 包与 `swift run` 都能取到，无需编译期注入宏。
@@ -316,6 +318,13 @@ final class AppModel: NSObject, ObservableObject {
     @Published var lastActionOutput: String = ""
     @Published var lastRefreshedText: String = "从未刷新"
 
+    /// 菜单栏弹窗中被用户隐藏（删除/清空已完成）的 QueueJob.id。持久化到 UserDefaults，避免重启后“复活”。
+    /// 队列为派生只读状态（每 2s 从事件日志重算），删除语义是“从弹窗视图移除”而非抹掉底层审计日志。
+    @Published var dismissedJobIDs: Set<String> = AppModel.loadDismissedJobIDs()
+
+    /// 是否已完成首屏快照加载。用于菜单栏弹窗区分“加载骨架态”与“空态”。
+    @Published var hasLoadedOnce: Bool = false
+
     /// 按打印机名持久化的校准设置。整张表以 JSON 存于单个 UserDefaults 键，
     /// 因为 @AppStorage 无法按打印机名动态建键。
     @Published var printerCalibrations: [String: PrinterCalibration] = AppModel.loadCalibrations()
@@ -427,6 +436,19 @@ final class AppModel: NSObject, ObservableObject {
         return decoded
     }
 
+    /// 从 UserDefaults 加载已隐藏的任务 id 集合；缺失/损坏回退空集。
+    private static func loadDismissedJobIDs() -> Set<String> {
+        guard let stored = UserDefaults.standard.array(forKey: SettingsKeys.dismissedJobIDs) as? [String] else {
+            return []
+        }
+        return Set(stored)
+    }
+
+    /// 把当前 dismissedJobIDs 编码写回 UserDefaults。
+    func saveDismissedJobIDs() {
+        UserDefaults.standard.set(Array(dismissedJobIDs), forKey: SettingsKeys.dismissedJobIDs)
+    }
+
     /// 将当前校准表编码写回 UserDefaults。
     func saveCalibrations() {
         guard let data = try? JSONEncoder().encode(printerCalibrations) else { return }
@@ -508,6 +530,7 @@ final class AppModel: NSObject, ObservableObject {
         recentTasks = Array(snapshot.recentTasks.prefix(20))
         printJobs = Array(snapshot.printJobs.prefix(12))
         printerDevices = snapshot.printerDevices
+        hasLoadedOnce = true
         // 预览 PDF 的 URL 变化意味着烘焙了新内容（web 端打单或自身防抖重烘焙），
         // 此时其中烘焙的校准就是当前打印机校准——同步 bakedCalibration 令增量变换归零。
         let previousPreview = latestPreviewPDF

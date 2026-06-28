@@ -238,6 +238,8 @@ struct PrintJob: Identifiable {
     let commandText: String?
     /// 文档级真实数据（运单号/收件人/地区）。无真实数据（旧日志/示例）时为空，下游回退占位。
     var documents: [QueueDocument] = []
+    /// 事件日志里的原始时间戳字符串（格式 `yyyy-MM-dd HH:mm:ss.SSS`）。解析失败/缺失为空，下游回退。
+    var createdAtText: String = ""
 }
 
 extension WaybillDocument {

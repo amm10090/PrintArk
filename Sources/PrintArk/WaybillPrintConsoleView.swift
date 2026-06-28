@@ -315,6 +315,8 @@ struct QueueJob: Identifiable, Equatable {
     let errorMessage: String?
     let commandText: String?
     let kind: QueueJobKind
+    /// 真实创建时间。从事件 `time`（`yyyy-MM-dd HH:mm:ss.SSS`）反解析；缺失/无法解析为 nil，UI 隐藏时间。
+    var createdAt: Date? = nil
 
     var subtitle: String {
         if status == .failed {
@@ -618,6 +620,21 @@ struct PrintQueueWorkspace: View {
 }
 
 extension QueueJob {
+    /// 事件时间戳解析器。事件 `time` 字段格式固定为 `yyyy-MM-dd HH:mm:ss.SSS`（见 NativePrintService.nowTimestamp）。
+    static let eventTimestampParser: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    /// 把原始时间戳字符串解析成 Date；缺失/格式不符（如示例的 "14:32"、"—"）返回 nil。
+    static func parseCreatedAt(_ text: String) -> Date? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, trimmed != "—" else { return nil }
+        return eventTimestampParser.date(from: trimmed)
+    }
+
     static func merged(printJobs: [PrintJob], recentTasks: [RecentTask]) -> [QueueJob] {
         let requestIDsWithPrintJobs = Set(printJobs.map(\.id))
         let liveJobs = printJobs.enumerated().flatMap { index, job in
@@ -664,7 +681,8 @@ extension QueueJob {
                     pdfPath: printJob.pdfPath,
                     errorMessage: printJob.errorMessage,
                     commandText: printJob.commandText,
-                    kind: printJob.queueKind
+                    kind: printJob.queueKind,
+                    createdAt: QueueJob.parseCreatedAt(printJob.createdAtText)
                 )
             }
         }
@@ -689,7 +707,8 @@ extension QueueJob {
             pdfPath: printJob.pdfPath,
             errorMessage: printJob.errorMessage,
             commandText: printJob.commandText,
-            kind: printJob.queueKind
+            kind: printJob.queueKind,
+            createdAt: QueueJob.parseCreatedAt(printJob.createdAtText)
         )]
     }
 
@@ -711,7 +730,8 @@ extension QueueJob {
                     pdfPath: "",
                     errorMessage: recentTask.queueErrorMessage,
                     commandText: "requestID=\(recentTask.requestID) · 第 \(docIndex + 1)/\(recentTask.documents.count) 张",
-                    kind: recentTask.queueKind
+                    kind: recentTask.queueKind,
+                    createdAt: QueueJob.parseCreatedAt(recentTask.timestampText)
                 )
             }
         }
@@ -732,7 +752,8 @@ extension QueueJob {
             pdfPath: "",
             errorMessage: recentTask.queueErrorMessage,
             commandText: "requestID=\(recentTask.requestID) · \(recentTask.documentCountText) 个文档",
-            kind: recentTask.queueKind
+            kind: recentTask.queueKind,
+            createdAt: QueueJob.parseCreatedAt(recentTask.timestampText)
         )]
     }
 
@@ -862,6 +883,59 @@ private extension RecentTask {
 extension AppModel {
     var queueJobs: [QueueJob] {
         QueueJob.merged(printJobs: printJobs, recentTasks: recentTasks)
+    }
+
+    /// 菜单栏弹窗专用队列：在 queueJobs 基础上滤掉用户已隐藏（删除/清空已完成）的任务。
+    /// 工作台仍用 queueJobs 显示全部，互不影响。
+    var menuBarQueueJobs: [QueueJob] {
+        queueJobs.filter { !dismissedJobIDs.contains($0.id) }
+    }
+
+    /// 从菜单栏弹窗隐藏单个任务（删除任务）。底层事件日志保留。
+    func dismiss(job: QueueJob) {
+        dismissedJobIDs.insert(job.id)
+        saveDismissedJobIDs()
+    }
+
+    /// 清空已完成：把当前可见队列中所有“已完成”任务隐藏。
+    func clearCompleted() {
+        let completed = menuBarQueueJobs.filter { $0.status == .done }.map(\.id)
+        guard !completed.isEmpty else { return }
+        dismissedJobIDs.formUnion(completed)
+        saveDismissedJobIDs()
+    }
+
+    /// 导出某任务的 PDF：弹 NSSavePanel，把已落盘的 pdfPath 拷贝到用户选定位置。
+    /// 返回 true 表示成功导出；pdfPath 为空/文件缺失/用户取消返回 false。
+    @discardableResult
+    func exportPDF(job: QueueJob) -> Bool {
+        guard !job.pdfPath.isEmpty else {
+            lastActionOutput = "导出失败：任务 \(job.waybillCode) 无可用 PDF"
+            return false
+        }
+        let sourceURL = URL(fileURLWithPath: job.pdfPath)
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else {
+            lastActionOutput = "导出失败：PDF 文件不存在"
+            return false
+        }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = "\(job.waybillCode.isEmpty ? job.id : job.waybillCode).pdf"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destURL = panel.url else {
+            return false
+        }
+        do {
+            if FileManager.default.fileExists(atPath: destURL.path) {
+                try FileManager.default.removeItem(at: destURL)
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: destURL)
+            lastActionOutput = "已导出：\(destURL.lastPathComponent)"
+            return true
+        } catch {
+            lastActionOutput = "导出失败：\(error.localizedDescription)"
+            return false
+        }
     }
 }
 

@@ -2189,7 +2189,8 @@ extension NativePrintService {
                 status: status,
                 errorMessage: error.isEmpty ? duplicateMessage : error,
                 commandText: event.string("commandText", default: event.string("previousCommandText")),
-                documents: decodeDocuments(from: event)
+                documents: decodeDocuments(from: event),
+                createdAtText: event.string("time")
             ), event.string("time"))
         }
         return jobs.values.sorted {
