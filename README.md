@@ -15,6 +15,23 @@ macOS native MVP for the Cainiao / Taobao print mock. The app now runs the local
 - macOS printer discovery plus `lpr` dry-run / explicit real-print pipeline
 - Task-specific waybill PDF rendering from each `print` payload
 
+## 安装(从 Release 下载)
+
+1. 到 [Releases](https://github.com/amm10090/PrintArk/releases) 下载最新的 `PrintArk-vX.Y.Z.app.zip` 并解压。
+2. 把 `PrintArk.app` 拖入「应用程序」。
+3. **首次打开前必须执行**以下命令:
+
+   ```bash
+   sudo xattr -cr /Applications/PrintArk.app
+   ```
+
+4. 然后正常双击打开。
+
+> ⚠️ **为什么提示「已损坏,无法打开」**:本 App 尚未经 Apple 开发者签名与公证,
+> 从网络下载的未签名 App 会被 macOS Gatekeeper 打上 `com.apple.quarantine` 隔离属性,
+> 双击时系统误报「已损坏」。上面的命令仅清除 **PrintArk.app 这一个 App** 的隔离属性
+> (已限定路径,不影响其他应用),清除后即可正常运行。这是未签名 App 的预期行为,非程序本身损坏。
+
 ## Run
 
 ```bash

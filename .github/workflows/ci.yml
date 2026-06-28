@@ -126,4 +126,30 @@ jobs:
         with:
           generate_release_notes: true
           files: dist/PrintArk-${{ github.ref_name }}.app.zip
+          body: |
+            ## 印舟 PrintArk ${{ github.ref_name }}
+
+            macOS 菜单栏原生打印服务,替代菜鸟 / 淘宝「X Print」Adobe 插件。
+
+            ### 📦 安装
+
+            1. 下载下方的 `PrintArk-${{ github.ref_name }}.app.zip` 并解压。
+            2. 把 `PrintArk.app` 拖入「应用程序」。
+            3. **首次打开前必须执行**以下命令(见下方「为什么」):
+               ```bash
+               sudo xattr -cr /Applications/PrintArk.app
+               ```
+            4. 然后正常双击打开即可。
+
+            ### ⚠️ 为什么会提示「已损坏,无法打开」
+
+            本 App **尚未经 Apple 开发者签名与公证**。从网络下载的未签名 App 会被 macOS Gatekeeper
+            打上 `com.apple.quarantine` 隔离属性,双击时系统会误报「已损坏」。上面的 `xattr -cr`
+            命令仅清除 **PrintArk.app 这一个 App** 的隔离属性(已限定路径,不影响其他应用),
+            清除后即可正常运行。这是未签名 App 的预期行为,非程序本身损坏。
+
+            ### 改动明细
+
+            <!-- 以下为本版本相对上一 tag 的提交与 PR 自动汇总 -->
+
 
