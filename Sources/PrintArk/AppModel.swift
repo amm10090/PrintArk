@@ -20,6 +20,8 @@ enum SettingsKeys {
     static let fontSizeMemoMM = "printark.fontSizeMemoMM"
     /// 菜单栏弹窗中已被用户隐藏（删除/清空已完成）的 QueueJob.id 集合，持久化以避免重启后“复活”。
     static let dismissedJobIDs = "printark.dismissedJobIDs"
+    /// 启动时自动检查 GitHub 新版本（默认开，静默检查，仅有新版才提示）。
+    static let autoCheckUpdate = "printark.autoCheckUpdate"
 }
 
 /// UserDefaults 键迁移：产品标识从 `Tabooprint` 改名 `PrintArk` 后，
@@ -104,6 +106,7 @@ enum FactoryDefaults {
             SettingsKeys.fontSizeItemInfoMM: 3.5,
             SettingsKeys.fontSizeMemoMM: 5.5,
             SettingsKeys.debugPreview: false,
+            SettingsKeys.autoCheckUpdate: true,
         ]
         UserDefaults.standard.register(defaults: values)
     }

@@ -1705,6 +1705,8 @@ struct ProtocolEmptyListView: View {
 struct VersionSummaryCard: View {
     @ObservedObject var model: AppModel
     @AppStorage(SettingsKeys.debugPreview) private var debugPreview = false
+    @AppStorage(SettingsKeys.autoCheckUpdate) private var autoCheckUpdate = true
+    @StateObject private var updater = UpdateChecker()
 
     var body: some View {
         VStack(spacing: 16) {
@@ -1716,6 +1718,8 @@ struct VersionSummaryCard: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+
+            UpdateCheckCard(updater: updater, autoCheckUpdate: $autoCheckUpdate)
 
             SettingsCard(title: "服务信息", subtitle: "本机服务监听端口与协议兼容版本。") {
                 VStack(alignment: .leading, spacing: 9) {
@@ -1782,9 +1786,187 @@ struct VersionSummaryCard: View {
     }
 }
 
+/// 在线检查更新卡片:检查按钮 + 状态文案 + 有新版时的更新弹窗(下载/解压/Finder 选中 + xattr 引导)。
+struct UpdateCheckCard: View {
+    @ObservedObject var updater: UpdateChecker
+    @Binding var autoCheckUpdate: Bool
+    @State private var showSheet = false
+
+    var body: some View {
+        SettingsCard(title: "软件更新", subtitle: "从 GitHub 检查并获取新版本。") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Button {
+                        updater.checkForUpdates()
+                    } label: {
+                        Label("检查更新", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(isChecking)
+
+                    if isChecking {
+                        ProgressView().controlSize(.small)
+                    }
+
+                    Spacer(minLength: 0)
+                    statusText
+                }
+
+                Toggle("启动时自动检查", isOn: $autoCheckUpdate)
+                    .font(.caption)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onChange(of: updater.state) { state in
+            if case .available = state { showSheet = true }
+        }
+        .onAppear {
+            // 自动检查:进入版本页时若开启则静默检查(仅有新版才弹窗)。
+            // 不放 applicationDidFinishLaunching 是因为更新弹窗在此页,启动时不可见无法呈现结果。
+            if autoCheckUpdate, case .idle = updater.state {
+                updater.checkForUpdates(silent: true)
+            }
+        }
+        .sheet(isPresented: $showSheet) {
+            UpdateSheet(updater: updater, isPresented: $showSheet)
+        }
+    }
+
+    private var isChecking: Bool {
+        if case .checking = updater.state { return true }
+        return false
+    }
+
+    @ViewBuilder
+    private var statusText: some View {
+        switch updater.state {
+        case .upToDate(let current):
+            Text("已是最新(v\(current))").font(.caption).foregroundStyle(.secondary)
+        case .failed(let message):
+            Text(message).font(.caption).foregroundStyle(.red).lineLimit(2)
+        case .available(let info):
+            Text("发现新版 \(info.version)").font(.caption).foregroundStyle(StatusMenuStyle.blue)
+        default:
+            EmptyView()
+        }
+    }
+}
+
+/// 有新版时的更新详情弹窗。
+private struct UpdateSheet: View {
+    @ObservedObject var updater: UpdateChecker
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            content
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch updater.state {
+        case .available(let info):
+            availableView(info)
+        case .downloading(let progress):
+            VStack(alignment: .leading, spacing: 12) {
+                Text("正在下载更新…").font(.headline)
+                ProgressView(value: progress)
+                Text("\(Int(progress * 100))%").font(.caption).foregroundStyle(.secondary)
+            }
+        case .downloaded(let appURL):
+            downloadedView(appURL)
+        case .failed(let message):
+            VStack(alignment: .leading, spacing: 12) {
+                Label("更新失败", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).font(.headline)
+                Text(message).font(.callout).foregroundStyle(.secondary)
+                HStack { Spacer(); Button("关闭") { isPresented = false } }
+            }
+        default:
+            Text("没有可用更新").onAppear { isPresented = false }
+        }
+    }
+
+    private func availableView(_ info: ReleaseInfo) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Image(systemName: "sparkles").foregroundStyle(StatusMenuStyle.blue)
+                Text("发现新版本 \(info.version)").font(.headline)
+                Spacer()
+                Text("当前 v\(AppInfo.version)").font(.caption).foregroundStyle(.secondary)
+            }
+
+            if !info.notes.isEmpty {
+                ScrollView {
+                    Text(info.notes)
+                        .font(.callout)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(maxHeight: 200)
+                .padding(10)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    updater.downloadUpdate(info)
+                } label: {
+                    Label("下载更新", systemImage: "arrow.down.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(info.zipURL == nil)
+
+                Button("打开 Release 页") { updater.openReleasePage(info) }
+
+                Spacer()
+                Button("稍后") { isPresented = false }
+            }
+
+            if info.zipURL == nil {
+                Text("该版本未附带 .app 产物,请用「打开 Release 页」手动下载。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func downloadedView(_ appURL: URL) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("下载完成", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.headline)
+            Text("已在「访达」中选中 PrintArk.app。请按以下步骤完成更新:")
+                .font(.callout)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("1. 把 PrintArk.app 拖入「应用程序」(替换旧版本)。").font(.callout)
+                Text("2. 首次打开前,在「终端」执行以下命令解除隔离:").font(.callout)
+                HStack(spacing: 8) {
+                    Text(UpdateChecker.xattrCommand)
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                    Button {
+                        updater.copyXattrCommand()
+                    } label: { Image(systemName: "doc.on.doc") }
+                    .help("复制命令")
+                }
+                Text("3. 重新打开 印舟。").font(.callout)
+            }
+
+            Text("说明:本 App 未经 Apple 签名,系统会对下载的 App 标记隔离;上述命令仅清除本 App 的隔离属性,不影响其他应用。")
+                .font(.caption).foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("完成") { isPresented = false }.buttonStyle(.borderedProminent)
+            }
+        }
+    }
+}
+
 struct PipelineStateBadge: View {
     let state: ServiceState
-
     private var color: Color {
         switch state {
         case .running:
