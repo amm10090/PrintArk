@@ -461,6 +461,8 @@ final class NativePrintService: @unchecked Sendable {
     }
 
     private func handlePrint(_ payload: [String: JSONValue], requestID: String, on channel: Channel) {
+        // 真实同步处理计时起点：覆盖解密 + 渲染 + 构造 flow，不含 sendFlow 内的模拟延迟。
+        let handleStart = CFAbsoluteTimeGetCurrent()
         let config = lock.withLock { configuration }
         let task = payload.object("task")
         let taskID = task.string("taskID", default: requestID)
@@ -643,6 +645,8 @@ final class NativePrintService: @unchecked Sendable {
             "docs": .object(docsMap),
         ]))
 
+        // 在调度模拟 flow 之前结算同步处理耗时，排除 sendFlow 内的定时发送延迟。
+        let realHandleMs = ((CFAbsoluteTimeGetCurrent() - handleStart) * 1000 * 100).rounded() / 100
         sendFlow(flow, on: channel)
         var fields: [String: JSONValue] = [
             "phase": .string("finish"),
@@ -655,6 +659,7 @@ final class NativePrintService: @unchecked Sendable {
             "result": .string(describeTaskResult(shouldReturnPreview: shouldReturnPreview, physicalPrintJob: physicalPrintJob)),
             "renderedPdf": .string(renderResult.url.path),
             "documents": documentsJSON,
+            "realHandleMs": .number(realHandleMs),
         ]
         if shouldReturnPreview {
             fields["previewURL"] = .string(previewURL)
@@ -696,7 +701,10 @@ final class NativePrintService: @unchecked Sendable {
 
     private func renderWaybill(payload: [String: JSONValue], requestID: String, taskID: String, docs: [ProtocolDocument], paperSize: PaperSize, hideTaoLogo: Bool, hideCourierPackage: Bool, hideBorder: Bool, itemInfoFontMM: CGFloat, memoFontMM: CGFloat, calibration: PrinterCalibration) -> RenderResult {
         do {
+            // 真实渲染计时：仅包裹同步 renderer.render，区别于硬编码的模拟 spendTime。
+            let renderStart = CFAbsoluteTimeGetCurrent()
             let result = try renderer.render(payload: payload, outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID, paperSize: paperSize, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM, calibration: calibration)
+            let realRenderMs = ((CFAbsoluteTimeGetCurrent() - renderStart) * 1000 * 100).rounded() / 100
             lock.withLock {
                 // 清理同一 taskID 的旧校准变体，避免反复调校准时缓存与磁盘膨胀。
                 let prefix = safeFilename(taskID)
@@ -715,6 +723,9 @@ final class NativePrintService: @unchecked Sendable {
                 "pdfPath": .string(result.url.path),
                 "fileName": .string(result.fileName),
                 "documentIds": .array(docs.map { .string($0.documentId) }),
+                "realRenderMs": .number(realRenderMs),
+                "decryptMs": .number(result.decryptMs ?? 0),
+                "drawMs": .number(result.drawMs ?? 0),
             ])
             return result
         } catch {
@@ -839,8 +850,11 @@ final class NativePrintService: @unchecked Sendable {
         process.standardError = errorPipe
         process.standardOutput = Pipe()
         do {
+            // 真实 lpr 提交计时：包裹 run→waitUntilExit 的子进程往返。
+            let lprStart = CFAbsoluteTimeGetCurrent()
             try process.run()
             process.waitUntilExit()
+            let realLprMs = ((CFAbsoluteTimeGetCurrent() - lprStart) * 1000 * 100).rounded() / 100
             if process.terminationStatus != 0 {
                 let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                 throw NSError(domain: "PrintArk", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: stderr.isEmpty ? "lpr failed" : stderr])
@@ -855,6 +869,7 @@ final class NativePrintService: @unchecked Sendable {
                 "pdfPath": .string(pdfURL.path),
                 "commandText": .string(commandText),
                 "documents": documentsJSON,
+                "realLprMs": .number(realLprMs),
             ])
             if let dedupeKey {
                 rememberPhysicalPrint(dedupeKey, item: PhysicalPrintHistoryItem(
@@ -1082,6 +1097,10 @@ struct RenderResult: Sendable {
     let fileName: String
     let documentIds: [String]
     var error: String?
+    // 渲染耗时细分（真实测量，区别于硬编码模拟 spendTime）：跨该次 render 所有文档累计。
+    // 仅成功路径填充，fallback/失败路径保持 nil。
+    var decryptMs: Double?
+    var drawMs: Double?
 }
 
 struct ProtocolDocument: Sendable {
@@ -1153,6 +1172,8 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             throw NSError(domain: "PrintArk", code: 1, userInfo: [NSLocalizedDescriptionKey: "cannot create PDF"])
         }
 
+        var totalDecryptMs = 0.0
+        var totalDrawMs = 0.0
         if documents.isEmpty {
             drawPage(context: context, pageRect: pageRect, contentRect: contentRect, calibration: calibration) {
                 drawText("PrintArk 空任务", at: CGPoint(x: 18, y: 32), size: 16, weight: .bold)
@@ -1161,11 +1182,13 @@ final class NativeWaybillRenderer: @unchecked Sendable {
             }
         } else {
             for (index, document) in documents.enumerated() {
-                drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM, calibration: calibration)
+                let timing = drawDocument(context: context, pageRect: pageRect, contentRect: contentRect, payload: payload, document: document, requestID: requestID, taskID: taskID, index: index, count: documents.count, hideTaoLogo: hideTaoLogo, hideCourierPackage: hideCourierPackage, hideBorder: hideBorder, itemInfoFontMM: itemInfoFontMM, memoFontMM: memoFontMM, calibration: calibration)
+                totalDecryptMs += timing.decryptMs
+                totalDrawMs += timing.drawMs
             }
         }
         context.closePDF()
-        return RenderResult(url: outputURL, fileName: fileName, documentIds: ids, error: nil)
+        return RenderResult(url: outputURL, fileName: fileName, documentIds: ids, error: nil, decryptMs: round(totalDecryptMs * 100) / 100, drawMs: round(totalDrawMs * 100) / 100)
     }
 
     /// 校准的文件名后缀：默认（identity）返回空串以保持纯 taskID 文件名；
@@ -1238,12 +1261,17 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         return Data(text.utf8)
     }
 
-    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int, hideTaoLogo: Bool, hideCourierPackage: Bool, hideBorder: Bool, itemInfoFontMM: CGFloat, memoFontMM: CGFloat, calibration: PrinterCalibration) {
+    private func drawDocument(context: CGContext, pageRect: CGRect, contentRect: CGRect, payload: [String: JSONValue], document: [String: JSONValue], requestID: String, taskID: String, index: Int, count: Int, hideTaoLogo: Bool, hideCourierPackage: Bool, hideBorder: Bool, itemInfoFontMM: CGFloat, memoFontMM: CGFloat, calibration: PrinterCalibration) -> (decryptMs: Double, drawMs: Double) {
+        var decryptMs = 0.0
+        var drawMs = 0.0
         drawPage(context: context, pageRect: pageRect, contentRect: contentRect, calibration: calibration) {
             let parts = splitContents(document)
+            let decryptStart = CFAbsoluteTimeGetCurrent()
             let decrypted = decryptWaybillContent(parts.standard)
+            decryptMs = (CFAbsoluteTimeGetCurrent() - decryptStart) * 1000
             let customData = parts.custom.object("data")
             let docID = document.string("documentID", default: document.string("documentId", default: customData.string("WAIBILLNO_BAR_CODE", default: "MOCK_DOC")))
+            let drawStart = CFAbsoluteTimeGetCurrent()
             drawCainiao300336(
                 pageRect: pageRect,
                 data: decrypted,
@@ -1258,7 +1286,9 @@ final class NativeWaybillRenderer: @unchecked Sendable {
                 itemInfoFontMM: itemInfoFontMM,
                 memoFontMM: memoFontMM
             )
+            drawMs = (CFAbsoluteTimeGetCurrent() - drawStart) * 1000
         }
+        return (decryptMs, drawMs)
     }
 
     private func drawPage(context: CGContext, pageRect: CGRect, contentRect: CGRect, calibration: PrinterCalibration = .identity, draw: () -> Void) {
