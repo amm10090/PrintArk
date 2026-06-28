@@ -10,7 +10,7 @@ DISPLAY_NAME="印舟"
 BUNDLE_ID="local.printark.app"
 MIN_SYSTEM_VERSION="13.0"
 # App 版本号：须与代码常量 AppInfo.version 字面对齐（单一数据源约定）。
-APP_VERSION="1.1.0"
+APP_VERSION="1.1.1"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
