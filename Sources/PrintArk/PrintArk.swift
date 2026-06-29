@@ -186,9 +186,10 @@ final class StatusItemController: NSObject {
         let size = NSSize(width: 20, height: 18)
         let image = NSImage(size: size, flipped: false) { rect in
             let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-            guard let base = NSImage(systemSymbolName: "printer", accessibilityDescription: nil)?
+            guard let base = NSImage(systemSymbolName: "printer.fill", accessibilityDescription: nil)?
                 .withSymbolConfiguration(config) else { return false }
-            // 基础打印机轮廓:用 label 色绘制(随明暗自适应)。
+            // 基础打印机实心图标:用 label 色绘制(随菜单栏明暗自适应,深色栏=白、浅色栏=黑),
+            // 实心比描边可视度更高。
             let baseSize = base.size
             let baseRect = NSRect(
                 x: (rect.width - baseSize.width) / 2,
