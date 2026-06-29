@@ -188,8 +188,8 @@ final class StatusItemController: NSObject {
             let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
             guard let base = NSImage(systemSymbolName: "printer.fill", accessibilityDescription: nil)?
                 .withSymbolConfiguration(config) else { return false }
-            // 基础打印机实心图标:用 label 色绘制(随菜单栏明暗自适应,深色栏=白、浅色栏=黑),
-            // 实心比描边可视度更高。
+            // 基础打印机实心图标:固定纯白填充(用户选定,深色菜单栏下可视度最高)。
+            // 注意:浅色菜单栏下纯白会偏淡;这是“强制纯白”方案的取舍。
             let baseSize = base.size
             let baseRect = NSRect(
                 x: (rect.width - baseSize.width) / 2,
@@ -197,8 +197,10 @@ final class StatusItemController: NSObject {
                 width: baseSize.width,
                 height: baseSize.height
             )
-            NSColor.labelColor.set()
-            base.draw(in: baseRect)
+            let whiteBase = base.copy() as! NSImage
+            whiteBase.isTemplate = true
+            NSColor.white.set()
+            whiteBase.draw(in: baseRect)
 
             // 角标:右上角彩色圆点 + 白色小符号。
             if let badge, let badgeSymbol {
