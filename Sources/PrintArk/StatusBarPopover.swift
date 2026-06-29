@@ -217,15 +217,19 @@ struct StatusBarPopoverView: View {
 
     // MARK: 内容区（三态）
 
-    @ViewBuilder
+    // 三态统一固定高度(= listMaxHeight),使弹窗尺寸在空态/骨架/列表间一致,
+    // 避免空态内容过矮导致 NSPopover 锚定计算错位(展开飘到屏幕角落)。
     private var content: some View {
-        if showsSkeleton {
-            skeletonList
-        } else if showsEmpty {
-            emptyState
-        } else {
-            queueList
+        Group {
+            if showsSkeleton {
+                skeletonList
+            } else if showsEmpty {
+                emptyState
+            } else {
+                queueList
+            }
         }
+        .frame(height: StatusMenuStyle.listMaxHeight)
     }
 
     private var queueList: some View {
