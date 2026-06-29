@@ -166,8 +166,9 @@ final class StatusItemController: NSObject {
         statusItem.button?.action = #selector(togglePopover(_:))
     }
 
-    /// 菜单栏图标三态:空闲(模板色打印机)/打印中(蓝色对勾角标)/错误(红色感叹角标)。
-    /// 角标为彩色,故整图 isTemplate=false,自绘 SF Symbol 打印机轮廓 + 右上角标圆点。
+    /// 菜单栏图标三态:空闲(系统模板色打印机)/打印中(蓝色对勾角标)/错误(红色感叹角标)。
+    /// 空闲态交给 NSStatusItem 的 template 渲染,才能和其他菜单栏图标一样随系统变白/变黑。
+    /// 角标为彩色时整图改为非模板,并把基础打印机实心绘成白色。
     private func statusBarIcon() -> NSImage {
         let hasFailed = model.queueJobs.contains { $0.status == .failed }
         let waitingConnection = model.serviceState == .running && model.activeBrowserConnections == 0
@@ -184,12 +185,21 @@ final class StatusItemController: NSObject {
         }
 
         let size = NSSize(width: 20, height: 18)
+        let usesTemplateRendering = badge == nil
+        let baseColor: NSColor = usesTemplateRendering ? .black : .white
+        guard let base = Self.tintedSymbolImage(
+            name: "printer.fill",
+            pointSize: 15,
+            weight: .regular,
+            color: baseColor
+        ) else {
+            return NSImage(systemSymbolName: "printer.fill", accessibilityDescription: statusAccessibilityDescription)
+                ?? NSImage(size: size)
+        }
+        let badgeGlyph = badgeSymbol.flatMap {
+            Self.tintedSymbolImage(name: $0, pointSize: 6, weight: .bold, color: .white)
+        }
         let image = NSImage(size: size, flipped: false) { rect in
-            let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-            guard let base = NSImage(systemSymbolName: "printer.fill", accessibilityDescription: nil)?
-                .withSymbolConfiguration(config) else { return false }
-            // 基础打印机实心图标:固定纯白填充(用户选定,深色菜单栏下可视度最高)。
-            // 注意:浅色菜单栏下纯白会偏淡;这是“强制纯白”方案的取舍。
             let baseSize = base.size
             let baseRect = NSRect(
                 x: (rect.width - baseSize.width) / 2,
@@ -197,36 +207,51 @@ final class StatusItemController: NSObject {
                 width: baseSize.width,
                 height: baseSize.height
             )
-            let whiteBase = base.copy() as! NSImage
-            whiteBase.isTemplate = true
-            NSColor.white.set()
-            whiteBase.draw(in: baseRect)
+            base.draw(in: baseRect)
 
             // 角标:右上角彩色圆点 + 白色小符号。
-            if let badge, let badgeSymbol {
+            if let badge {
                 let d: CGFloat = 9
                 let badgeRect = NSRect(x: rect.width - d, y: rect.height - d, width: d, height: d)
                 badge.set()
                 NSBezierPath(ovalIn: badgeRect).fill()
-                let badgeConfig = NSImage.SymbolConfiguration(pointSize: 6, weight: .bold)
-                if let glyph = NSImage(systemSymbolName: badgeSymbol, accessibilityDescription: nil)?
-                    .withSymbolConfiguration(badgeConfig) {
+                if let glyph = badgeGlyph {
                     let g = glyph.size
                     let gRect = NSRect(
                         x: badgeRect.midX - g.width / 2,
                         y: badgeRect.midY - g.height / 2,
                         width: g.width, height: g.height
                     )
-                    let tinted = glyph.copy() as! NSImage
-                    tinted.isTemplate = true
-                    NSColor.white.set()
-                    tinted.draw(in: gRect)
+                    glyph.draw(in: gRect)
                 }
             }
             _ = waitingConnection
             return true
         }
         image.accessibilityDescription = statusAccessibilityDescription
+        image.isTemplate = usesTemplateRendering
+        return image
+    }
+
+    private static func tintedSymbolImage(
+        name: String,
+        pointSize: CGFloat,
+        weight: NSFont.Weight,
+        color: NSColor
+    ) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
+        guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config) else {
+            return nil
+        }
+        let rect = NSRect(origin: .zero, size: symbol.size)
+        let image = NSImage(size: symbol.size)
+        image.lockFocus()
+        symbol.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+        color.set()
+        rect.fill(using: .sourceAtop)
+        image.unlockFocus()
+        image.isTemplate = false
         return image
     }
 
