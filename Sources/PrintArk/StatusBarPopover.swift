@@ -37,6 +37,9 @@ enum StatusMenuStyle {
 
     static let menuWidth: CGFloat = 360
     static let listMaxHeight: CGFloat = 392
+    /// 弹窗整体固定高度。根视图、popover.contentSize、NSHostingController 三处共用此单一来源,
+    /// 消除“声明尺寸 vs 固有尺寸”冲突导致的 NSPopover 锚定错位。
+    static let menuHeight: CGFloat = 520
 
     // 入场动画曲线（设计稿 cubic-bezier(0.16,1,0.3,1) 的近似）
     static let entrance = Animation.spring(response: 0.34, dampingFraction: 0.82)
@@ -161,7 +164,7 @@ struct StatusBarPopoverView: View {
             Divider().overlay(StatusMenuStyle.separator)
             footer
         }
-        .frame(width: StatusMenuStyle.menuWidth)
+        .frame(width: StatusMenuStyle.menuWidth, height: StatusMenuStyle.menuHeight)
         .background(StatusMenuStyle.menuSurface)
         .overlay(alignment: .topLeading) { contextMenuOverlay }
         .overlay(alignment: .bottom) { toastOverlay }
@@ -217,8 +220,8 @@ struct StatusBarPopoverView: View {
 
     // MARK: 内容区（三态）
 
-    // 三态统一固定高度(= listMaxHeight),使弹窗尺寸在空态/骨架/列表间一致,
-    // 避免空态内容过矮导致 NSPopover 锚定计算错位(展开飘到屏幕角落)。
+    // 根视图整体固定 menuHeight,内容区填充 header/footer 之间的剩余空间。
+    // 三态(骨架/空/列表)都在此区域内,弹窗总尺寸恒定,NSPopover 锚定确定。
     private var content: some View {
         Group {
             if showsSkeleton {
@@ -229,7 +232,7 @@ struct StatusBarPopoverView: View {
                 queueList
             }
         }
-        .frame(height: StatusMenuStyle.listMaxHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var queueList: some View {

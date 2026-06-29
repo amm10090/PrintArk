@@ -229,8 +229,8 @@ final class StatusItemController: NSObject {
 
     private func configurePopover() {
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: StatusMenuStyle.menuWidth, height: 540)
-        popover.contentViewController = NSHostingController(
+        popover.contentSize = NSSize(width: StatusMenuStyle.menuWidth, height: StatusMenuStyle.menuHeight)
+        let hosting = NSHostingController(
             rootView: StatusBarPopoverView(
                 model: model,
                 actions: StatusBarPopoverActions(
@@ -249,6 +249,10 @@ final class StatusItemController: NSObject {
                 )
             )
         )
+        // 禁止 NSHostingController 用 SwiftUI 固有尺寸覆盖 popover.contentSize —— 二者冲突会让
+        // NSPopover 拿不到稳定尺寸而把弹窗定位退化到屏幕原点(展开飘到左上角、挡住状态栏)。
+        hosting.sizingOptions = []
+        popover.contentViewController = hosting
     }
 
     private var statusSymbolName: String {
