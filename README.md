@@ -1,197 +1,69 @@
-# PrintArk
+# PrintArk（印舟）
 
-macOS native MVP for the Cainiao / Taobao print mock. The app now runs the local print replacement service directly in Swift: WebSocket on `13528`, HTTP preview PDFs on `13525`, task history, redacted logs, dry-run printing, and duplicate protection all live inside the native runtime.
+PrintArk 是一个面向 macOS 的本地电子面单打印助手，用来替代菜鸟 / 千牛打印链路中依赖的本机打印服务。它在本机接收来自淘宝、千牛等页面的打印请求，生成可预览的面单 PDF，并把需要真实出纸的任务交给 macOS 打印系统处理。
 
-## Current MVP
+这个项目的目标很简单：让面单打印从“黑盒插件 + 难排查的本地服务”变成一个可见、可控、可调校的 macOS 应用。
 
-- SwiftUI macOS app shell
-- Start, stop, restart, and status controls
-- Runtime mode selector
-- Auto-open preview toggle
-- Recent task table
-- Redacted log viewer
-- Native SwiftNIO service for ports `13528` and `13525`
-- Regression replay for `preview=true`, `preview=false`, empty documents, and decrypt failure
-- macOS printer discovery plus `lpr` dry-run / explicit real-print pipeline
-- Task-specific waybill PDF rendering from each `print` payload
+## 适合谁
 
-## 安装(从 Release 下载)
+- 需要在 macOS 上处理淘宝、千牛、菜鸟相关电子面单打印的用户
+- 想要查看当前面单内容、预览 PDF、确认打印任务状态的用户
+- 需要调整热敏打印机纸张、偏移、旋转、缩放、字号等参数的用户
+- 需要排查“页面显示已打印但机器没出纸”“重复提交”“失败后重打”等问题的用户
+
+## 它解决什么问题
+
+传统打印链路通常把关键过程藏在本地插件或后台服务里：页面发出了什么请求、生成了哪张面单、是否进入真实打印、打印机收到的任务是什么，都不容易确认。PrintArk 把这些过程集中到一个原生 macOS 工作台里：
+
+- 页面打印请求进入本机服务后，可以在应用里看到任务状态。
+- 面单会先渲染为 PDF，方便预览、校准和保存。
+- 真实打印会走 macOS / CUPS 打印队列，便于复用系统打印机配置。
+- 失败任务可以在应用里重试，减少回到网页重新操作的成本。
+
+## 核心能力
+
+- **本地兼容服务**：兼容菜鸟 / X Print 常用的本机通信入口，页面无需感知底层实现已替换。
+- **面单预览**：从真实打印请求生成任务专属 PDF，并在应用中直接查看。
+- **打印队列**：展示最近任务、打印状态、失败原因和已生成的面单文件。
+- **打印机设置**：选择打印机、纸张规格、是否真实打印，以及适配热敏面单的常用选项。
+- **校准工具**：按打印机保存偏移、旋转、缩放和自适应纸张设置。
+- **字号调整**：支持调整商品信息、买家备注、卖家备注等面单区域的字号。
+- **失败重试**：对已渲染但提交失败的面单进行重新打印。
+- **菜单栏常驻**：服务状态、队列摘要和常用操作可以从菜单栏快速访问。
+- **更新检查**：在应用内检查 GitHub Release 中的新版本。
+
+## 使用方式
+
+1. 打开 PrintArk，应用会启动本机打印服务并常驻菜单栏。
+2. 在淘宝 / 千牛页面中按原来的方式发起面单打印。
+3. 回到 PrintArk 查看当前面单、打印队列和任务状态。
+4. 如果需要真实出纸，在打印设置中选择正确打印机，并确认已关闭模拟打印。
+5. 如果纸张位置不准，在当前面单页右侧调整偏移、旋转、缩放或纸张设置。
+
+PrintArk 默认更偏向安全预览：先让你看到面单和任务状态，再决定是否进入真实打印。对热敏打印机或新模板，建议先用预览和模拟打印确认效果，再开启真实打印。
+
+## 安装
 
 1. 到 [Releases](https://github.com/amm10090/PrintArk/releases) 下载最新的 `PrintArk-vX.Y.Z.app.zip` 并解压。
 2. 把 `PrintArk.app` 拖入「应用程序」。
-3. **首次打开前必须执行**以下命令:
+3. 首次打开前执行：
 
    ```bash
    sudo xattr -cr /Applications/PrintArk.app
    ```
 
-4. 然后正常双击打开。
+4. 双击打开 `PrintArk.app`。
 
-> ⚠️ **为什么提示「已损坏,无法打开」**:本 App 尚未经 Apple 开发者签名与公证,
-> 从网络下载的未签名 App 会被 macOS Gatekeeper 打上 `com.apple.quarantine` 隔离属性,
-> 双击时系统误报「已损坏」。上面的命令仅清除 **PrintArk.app 这一个 App** 的隔离属性
-> (已限定路径,不影响其他应用),清除后即可正常运行。这是未签名 App 的预期行为,非程序本身损坏。
+目前发布包尚未经过 Apple 开发者签名与公证。macOS 可能会把从网络下载的 App 标记为“已损坏，无法打开”；上面的命令只清除 `/Applications/PrintArk.app` 这一项的隔离属性，不会影响其他应用。
 
-## Run
+## 当前状态
 
-```bash
-rtk swift build
-rtk .build/debug/PrintArk --service-only --auto-open-preview false
-```
+PrintArk 当前是一个原生 Swift / SwiftUI macOS 应用，支持菜单栏常驻、面单工作台、打印队列、失败重试、版本检查，以及本地打印服务。核心场景围绕淘宝 / 千牛 / 菜鸟电子面单打印展开，当前重点支持已验证的中通面单模板与 macOS 打印机队列。
 
-Launch the built app from Xcode or the generated SwiftPM product for the menu bar UI. Use `--service-only` for protocol replay and command-line verification.
+如果遇到新的快递公司、模板 ID、纸张规格或页面打印流程，可能需要继续补充模板适配和协议兼容。
 
-## Xcode Previews
+## 项目背景
 
-The package now exposes:
+PrintArk 起源于对菜鸟 / X Print 本地打印协议的实测和替代实现。早期目标是验证浏览器页面、本机 WebSocket 服务、PDF 预览服务和物理打印之间的完整链路；现在项目已经收敛为一个面向日常使用的 macOS 打印工具。
 
-- executable product `PrintArk`
-- library product `PrintArkKit`
-
-If Xcode refuses to preview SwiftUI views from the executable product, use the library-backed preview/build boundary from `PrintArkKit`. The service binary and command-line smoke tests still run through `PrintArk`.
-
-## Notes
-
-- `raw_capture_artifacts/` is treated as evidence and not mutated.
-- `preview=true` remains the default runtime behavior for the native service.
-- The runtime no longer depends on Node.js, bash service wrappers, or the previous Python renderer.
-
-## 目录结构
-
-```
-Tabooprint/
-├── docs/                      # 最终文档
-│   ├── 13528_ws_request_formats.md   # 请求格式（setPrinterConfig + print）
-│   ├── 13528_ws_response_formats.md  # 响应格式（6 步流详解）
-│   ├── final_protocol_findings.md    # 综合协议报告
-│   ├── consolidated_findings.md      # 发现汇总
-│   ├── capture_summary.md            # 捕获过程总结
-│   ├── findings.md                   # 早期发现
-│   ├── checkpoint_turn125.md         # 关键进展 checkpoint
-│   └── checkpoint_turn105_plus.md    # 中期 checkpoint
-├── scripts/                   # 可运行工具
-│   ├── replay_13528_preview.py       # [✅ 已验证] replay 验证脚本
-├── captures/
-│   ├── probe_results/         # 原始捕获的关键 JSON 负载
-│   │   ├── 13528_setPrinterConfig_*.json       # 真实 setPrinterConfig
-│   │   ├── 13528_print_*.json                  # 真实 print (含密文)
-│   │   ├── manual_ws_*_probe.json              # 手动 probe 结果
-│   │   ├── after_start_print_capture.json      # 完整 print 捕获
-│   │   ├── preview_print_probe_payload.json    # preview probe
-│   │   ├── mtop_xhr_around_print.json          # MTOP XHR 调用
-│   │   ├── local_13528_ws_messages.json        # 本地 WS 消息
-│   │   └── ...
-│   └── replay_results/        # 回放验证结果
-│       ├── replay_result_1782276036.json
-│       └── replay_result_1782276069.json
-├── raw_capture_artifacts/      # 从 temp 实际移动过来的原始捕获目录
-│   └── cainiao_capture/        # 原封不动的 90 个捕获/探测/文档/脚本产物
-├── app_reverse/               # 菜鸟 App / X Print 运行时逆向资料
-│   ├── README.md
-│   ├── plans/
-│   │   ├── plan_cainiao_reverse/     # 静态逆向计划与探测记录
-│   │   └── plan_cainiao_runtime/     # 运行时验证计划与观测报告
-│   └── raw_runs/
-│       ├── cainiao_reverse_explore/  # 逆向探索子任务输入/输出
-│       └── cainiao_runtime_verify/   # 运行时验证日志/上下文
-└── intermediate/              # 调试中间产物（按需追溯）
-    ├── after_*.json
-    ├── checkbox_*.json
-    ├── click_*.json
-    ├── find_*.json
-    └── ...
-```
-
-## 快速验证
-
-```bash
-cd /Users/amo/project/Tabooprint
-rtk .build/debug/PrintArk --service-only --auto-open-preview false
-rtk python3 scripts/replay_13528_preview.py
-```
-
-`preview=false` 需要以尊重 preview 标记的模式启动：
-
-```bash
-rtk .build/debug/PrintArk --service-only --auto-open-preview false --force-preview false --print-dry-run true
-rtk python3 scripts/replay_13528_preview.py --case preview-false
-rtk python3 scripts/replay_13528_preview.py --case empty-documents
-```
-
-解密失败模式：
-
-```bash
-rtk .build/debug/PrintArk --service-only --auto-open-preview false --fail decrypt
-rtk python3 scripts/replay_13528_preview.py --case decrypt-failure
-```
-
-预期输出示例：
-
-```
-[PASS] Case preview verified! All 6 messages match expected pattern.
-```
-
-## 物理打印管线
-
-`preview=false` 可以进入 macOS 打印路径。默认是 dry-run，只记录即将执行的 `lpr` 命令，不会真实打印：
-
-```bash
-rtk .build/debug/PrintArk --service-only --force-preview false --printer-name TAOBAO --print-media 100x180mm --print-dry-run true
-```
-
-真实打印必须显式关闭 dry-run：
-
-```bash
-rtk .build/debug/PrintArk --service-only --force-preview false --printer-name TAOBAO --print-media 100x180mm --print-dry-run false
-```
-
-物理打印默认启用 10 分钟任务去重。服务会按打印机、纸张参数、documentID 和面单内容指纹识别重复任务；命中重复时跳过第二次 `lpr`，但仍向千牛返回成功流程，避免页面卡住。需要强制重打时可以重启服务、等待去重窗口过期，或显式关闭：
-
-```bash
-rtk .build/debug/PrintArk --service-only --force-preview false --printer-name TAOBAO --print-dry-run false --print-dedupe false
-```
-
-也可以调整窗口：
-
-```bash
-rtk .build/debug/PrintArk --service-only --force-preview false --printer-name TAOBAO --print-dry-run false --dedupe-window-ms 60000
-```
-
-### 已验证打印机：AiYin QR-368（TSPL）
-
-实测可正常出纸的热敏机为 **AiYin QR-368**，其 CUPS PPD 的 `Personality` 为 `tspl`（TSPL 指令集）。PrintArk 始终送出 **PDF**，由 CUPS 队列内置的 PostScript→TSPL 过滤链转换为打印机可识别的指令，因此不需要应用侧关心 TSPL。
-
-排障要点（基于一次真实定位）：
-
-- `lpr` 退出码为 0、CUPS 标记 job 为 completed，**不代表纸张真的打印出来了**。LPD/网络队列（如 `lpd://<host>/TAOBAO`）是“投递即完成”，远端设备是否真正出纸不回传状态。
-- 若提交成功却不出纸，先排查 CUPS/打印机侧而非应用：`lpstat -p <printer> -l`（看 `processing-to-stop-point` 等卡死状态）、`lpstat -W completed -l -o <printer>`、`/var/log/cups/error_log`，以及直接 `printf 'x\n' | lpr -P <printer>` 绕过应用验证。打印机/队列卡死时，重启打印机通常可清除。
-
-当前会先从本次 `print` payload 生成任务专属 PDF，再把这份 PDF 用于 preview URL 或 `lpr`。Swift 渲染器会解开 `contents[0].encryptedData`，并按当前中通 300336 标准模板与 73159162 自定义区的固定毫米坐标绘制：
-
-- 面单号 / 条码
-- 收件人、隐私号、路由码、集包信息、寄件人等标准面单字段
-- 淘宝文本标识、收/寄/验标识、左右竖排面单号、分隔线与底部条码区
-- 商品、数量、买家备注、卖家备注等 custom area 字段
-
-已验证输出纸规为官方预览一致的 74x126mm。当前支持已抓到的中通 300336/73159162 组合；后续如遇到新快递公司或新模板 ID，需要补对应模板映射或实现完整模板解释器。
-
-## 协议核心：6 步预览流
-
-| # | cmd | status | 含义 |
-|---|-----|--------|------|
-| 1 | notifyTaskResult | initial | 任务初始化 |
-| 2 | print | success / errorCode=0 | 打印请求被接收 |
-| 3 | notifyDocResult | rendered | 文档渲染完成 |
-| 4 | notifyDocResult | printed | 文档处理完成 |
-| 5 | print | success + previewURL | 预览 URL 就绪 |
-| 6 | notifyTaskResult | completeSuccess | 任务结束 |
-
-`preview=false` 时，第 5 步改为 `notifyPrintResult`，并且不会返回 `previewURL`。
-
-## 关键发现
-
-- 13528 端口是 Adobe X Print 插件本地 WebSocket 服务
-- 标准面单数据使用 `AES:` 加密，`waybill_print_secret_version_1` 可由本地 renderer 解密
-- HTTP 预览 PDF 在 **13525** 端口提供
-- `preview=true` 时跳过物理打印，返回预览 URL
-- 可通过 `setPrinterConfig` 配置打印机名称和 logo 选项
+仓库中仍保留了部分回放脚本和协议验证材料，主要用于确认兼容性和回归测试。普通用户只需要安装并运行 App。
