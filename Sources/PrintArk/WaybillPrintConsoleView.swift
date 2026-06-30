@@ -1765,7 +1765,7 @@ struct VersionSummaryCard: View {
                     Divider()
 
                     HStack(spacing: 8) {
-                        Button(action: model.refresh) {
+                        Button(action: model.refreshPrinters) {
                             Label("刷新", systemImage: "arrow.clockwise")
                         }
 
@@ -2035,7 +2035,7 @@ struct ServiceControlsPanel: View {
                 }
                 .disabled(model.serviceState == .stopped || model.serviceState == .stopping)
 
-                Button(action: model.refresh) {
+                Button(action: model.refreshPrinters) {
                     Label("刷新", systemImage: "arrow.clockwise")
                 }
 

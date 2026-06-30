@@ -68,7 +68,7 @@ enum SettingsMigration {
 /// build 脚本的 Info.plist（CFBundleShortVersionString）需人工对齐同一字面。
 /// 注意：协议伪装字段（getAgentInfo 的 "1.5.3.0"）不是 App 版本，与此无关。
 enum AppInfo {
-    static let version = "1.1.7"
+    static let version = "1.1.8"
 
     /// 构建日期（本地化短日期）。以可执行文件的修改时间作为编译期代理——
     /// `.app` 包与 `swift run` 都能取到，无需编译期注入宏。
@@ -178,7 +178,7 @@ enum ServiceAction: String {
     case restart
 }
 
-struct PortStatus: Identifiable {
+struct PortStatus: Identifiable, Equatable {
     let id: Int
     let port: Int
     let label: String
@@ -232,7 +232,18 @@ struct RecentTask: Identifiable {
     var documentCountText: String { "\(documentCount)" }
 }
 
+struct SupervisorSnapshotToken: Equatable {
+    let serviceState: ServiceState
+    let serviceSummary: String
+    let ports: [PortStatus]
+    let activeBrowserConnections: Int
+    let logRevision: Int
+    let latestPreviewPDF: URL?
+    let printerDevices: [PrinterDevice]
+}
+
 struct SupervisorSnapshot {
+    let token: SupervisorSnapshotToken
     let serviceState: ServiceState
     let serviceSummary: String
     let ports: [PortStatus]
@@ -339,10 +350,26 @@ final class AppModel: NSObject, ObservableObject {
 
     private let printService = NativePrintService()
     private var pollingTimer: Timer?
+    private var eventRefreshTimer: Timer?
     private var logViewerLineBaseline = 0
     private var lastRawLogLineCount = 0
+    private var lastAppliedSnapshotToken: SupervisorSnapshotToken?
+
+    private static let fallbackRefreshInterval: TimeInterval = 20
+    private static let fallbackRefreshTolerance: TimeInterval = 5
+    private static let eventRefreshDebounce: TimeInterval = 0.18
 
     var onRefresh: (() -> Void)?
+
+    override init() {
+        super.init()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(nativeServiceDidChange(_:)),
+            name: NativePrintService.didChangeNotification,
+            object: printService
+        )
+    }
 
     /// 让本机服务的事件日志同时写到标准输出，方便在 Xcode 控制台 / 终端实时查看。
     /// GUI 模式默认不接 sink（日志只进窗口内的查看器），调试时调用此方法即可镜像到 stdout。
@@ -355,17 +382,29 @@ final class AppModel: NSObject, ObservableObject {
 
     func startPolling() {
         stopPolling()
-        pollingTimer = Timer.scheduledTimer(timeInterval: 2.0, target: self, selector: #selector(pollTimerFired(_:)), userInfo: nil, repeats: true)
+        pollingTimer = Timer.scheduledTimer(
+            timeInterval: Self.fallbackRefreshInterval,
+            target: self,
+            selector: #selector(pollTimerFired(_:)),
+            userInfo: nil,
+            repeats: true
+        )
+        pollingTimer?.tolerance = Self.fallbackRefreshTolerance
     }
 
     func stopPolling() {
         pollingTimer?.invalidate()
         pollingTimer = nil
+        eventRefreshTimer?.invalidate()
+        eventRefreshTimer = nil
     }
 
     func refresh() {
-        let snapshot = printService.snapshot()
-        apply(snapshot: snapshot)
+        refresh(forcePrinterRefresh: false, onlyIfChanged: false)
+    }
+
+    func refreshPrinters() {
+        refresh(forcePrinterRefresh: true, onlyIfChanged: false)
     }
 
     func startService() {
@@ -469,7 +508,7 @@ final class AppModel: NSObject, ObservableObject {
     /// 用于内容类变化（隐藏标记、纸张、打印机切换）等确实需要重绘 PDF 的场景。
     func rebakePreviewNow() {
         let didRerender = printService.applyPrintSettings(resolvedPrintSettings())
-        apply(snapshot: printService.snapshot())
+        apply(snapshot: printService.snapshot(), onlyIfChanged: false)
         if didRerender {
             lastActionOutput = "已按新设置更新预览"
         }
@@ -518,14 +557,38 @@ final class AppModel: NSObject, ObservableObject {
             result = printService.restart(configuration: configuration)
         }
         lastActionOutput = result.output.isEmpty ? "命令已执行" : result.output
-        apply(snapshot: printService.snapshot())
+        apply(snapshot: printService.snapshot(forcePrinterRefresh: true), onlyIfChanged: false)
         if result.exitCode != 0 {
             serviceState = .error
             serviceSummary = "错误 • \(lastActionOutput)"
         }
     }
 
-    private func apply(snapshot: SupervisorSnapshot) {
+    private func refresh(forcePrinterRefresh: Bool, onlyIfChanged: Bool) {
+        let snapshot = printService.snapshot(forcePrinterRefresh: forcePrinterRefresh)
+        apply(snapshot: snapshot, onlyIfChanged: onlyIfChanged)
+    }
+
+    private func refreshIfChanged(forcePrinterRefresh: Bool = false) {
+        refresh(forcePrinterRefresh: forcePrinterRefresh, onlyIfChanged: true)
+    }
+
+    private func scheduleEventRefresh() {
+        eventRefreshTimer?.invalidate()
+        eventRefreshTimer = Timer.scheduledTimer(
+            timeInterval: Self.eventRefreshDebounce,
+            target: self,
+            selector: #selector(eventRefreshTimerFired(_:)),
+            userInfo: nil,
+            repeats: false
+        )
+    }
+
+    private func apply(snapshot: SupervisorSnapshot, onlyIfChanged: Bool) {
+        if onlyIfChanged, hasLoadedOnce, snapshot.token == lastAppliedSnapshotToken {
+            return
+        }
+        lastAppliedSnapshotToken = snapshot.token
         serviceState = snapshot.serviceState
         serviceSummary = snapshot.serviceSummary
         ports = snapshot.ports
@@ -567,6 +630,15 @@ final class AppModel: NSObject, ObservableObject {
     }()
 
     @objc private func pollTimerFired(_ sender: Timer) {
-        refresh()
+        refreshIfChanged()
+    }
+
+    @objc private func eventRefreshTimerFired(_ sender: Timer) {
+        eventRefreshTimer = nil
+        refreshIfChanged()
+    }
+
+    @objc private func nativeServiceDidChange(_ notification: Notification) {
+        scheduleEventRefresh()
     }
 }

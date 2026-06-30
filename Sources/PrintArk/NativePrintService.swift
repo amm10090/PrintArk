@@ -61,6 +61,8 @@ struct NativeServiceRuntime: Sendable {
 }
 
 final class NativePrintService: @unchecked Sendable {
+    static let didChangeNotification = Notification.Name("PrintArk.NativePrintService.didChange")
+
     private let lock = NSLock()
     private var runtime: NativeServiceRuntime?
     private var logSink: (@Sendable (String) -> Void)?
@@ -71,7 +73,12 @@ final class NativePrintService: @unchecked Sendable {
     )
     private var activeConnections = 0
     private var logLines: [String] = []
+    private var logRevision = 0
+    private var parsedLogCache: ParsedLogCache?
     private var renderedPDFs: [String: URL] = [:]
+    private var latestRenderedPDF: URL?
+    private var cachedPrinterDevices: [PrinterDevice]?
+    private var cachedPrinterDevicesAt: Date = .distantPast
     private var physicalPrintHistory: [String: PhysicalPrintHistoryItem] = [:]
     /// 真实电话内存缓存（key = `requestID#docIndex`）。合规约定：电话不落盘到事件日志，
     /// 仅进此进程内存缓存，由 snapshot() 在锁内按 key 注入到各 QueueDocument.receiverPhone。
@@ -84,12 +91,18 @@ final class NativePrintService: @unchecked Sendable {
     private let renderedDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("printark", isDirectory: true)
         .appendingPathComponent("waybills", isDirectory: true)
+    private let printerCacheTTL: TimeInterval = 60
+
+    private struct ParsedLogCache {
+        let logRevision: Int
+        let fallbackPrinter: String
+        let recentTasks: [RecentTask]
+        let printJobs: [PrintJob]
+    }
 
     var latestPreviewPDF: URL? {
         lock.withLock {
-            renderedPDFs.values
-                .sorted { modificationDate($0) > modificationDate($1) }
-                .first
+            latestRenderedPDF
         }
     }
 
@@ -249,21 +262,23 @@ final class NativePrintService: @unchecked Sendable {
         return true
     }
 
-    func snapshot() -> SupervisorSnapshot {
+    func snapshot(forcePrinterRefresh: Bool = false) -> SupervisorSnapshot {
         let stateValues = lock.withLock {
-            (configuration, lastError, activeConnections, logLines)
+            (configuration, lastError, activeConnections, logLines, logRevision)
         }
         let config = stateValues.0
         let error = stateValues.1
         let connections = stateValues.2
         let lines = stateValues.3
+        let revision = stateValues.4
         let running = isRunning
         let ports = [
             PortStatus(id: config.webSocketPort, port: config.webSocketPort, label: "WS", isListening: running, listenerCount: running ? 1 : 0),
             PortStatus(id: config.httpPort, port: config.httpPort, label: "HTTP", isListening: running, listenerCount: running ? 1 : 0),
         ]
-        let tasks = Self.parseRecentTasks(from: lines)
-        let jobs = Self.parsePrintJobs(from: lines, fallbackPrinter: config.printSettings.printerName)
+        let parsedLogs = parsedLogs(from: lines, revision: revision, fallbackPrinter: config.printSettings.printerName)
+        let tasks = parsedLogs.recentTasks
+        let jobs = parsedLogs.printJobs
         // 电话不落盘，故 parse 出的 documents 不含电话；在此从内存缓存按 requestID#index 注入。
         let tasksWithPhones = lock.withLock {
             tasks.map { task -> RecentTask in
@@ -285,16 +300,28 @@ final class NativePrintService: @unchecked Sendable {
         let portSummary = ports.map { "\($0.label)\($0.stateText)" }.joined(separator: " · ")
         let connectionText = connections == 1 ? "1 个浏览器连接" : "\(connections) 个浏览器连接"
         let summary = state == .error ? "错误 • \(error)" : "\(state.title) • \(portSummary) • \(connectionText)"
+        let printers = printerDevices(defaultPrinterName: config.printSettings.printerName, forceRefresh: forcePrinterRefresh)
+        let latest = latestPreviewPDF
+        let token = SupervisorSnapshotToken(
+            serviceState: state,
+            serviceSummary: summary,
+            ports: ports,
+            activeBrowserConnections: connections,
+            logRevision: revision,
+            latestPreviewPDF: latest,
+            printerDevices: printers
+        )
         return SupervisorSnapshot(
+            token: token,
             serviceState: state,
             serviceSummary: summary,
             ports: ports,
             activeBrowserConnections: connections,
             recentTasks: tasksWithPhones,
             printJobs: jobsWithPhones,
-            printerDevices: discoverPrinterDevices(defaultPrinterName: config.printSettings.printerName),
+            printerDevices: printers,
             rawLogLines: lines,
-            latestPreviewPDF: latestPreviewPDF,
+            latestPreviewPDF: latest,
             pidIsAlive: running
         )
     }
@@ -714,6 +741,7 @@ final class NativePrintService: @unchecked Sendable {
                     renderedPDFs.removeValue(forKey: name)
                 }
                 renderedPDFs[result.fileName] = result.url
+                latestRenderedPDF = result.url
                 lastRenderContext = (payload: payload, requestID: requestID, taskID: taskID)
             }
             emit("render", [
@@ -732,6 +760,7 @@ final class NativePrintService: @unchecked Sendable {
             let fallback = renderer.writeFallbackPDF(outputDirectory: renderedDirectory, requestID: requestID, taskID: taskID)
             lock.withLock {
                 renderedPDFs[fallback.fileName] = fallback.url
+                latestRenderedPDF = fallback.url
             }
             emit("render", [
                 "phase": .string("failed"),
@@ -970,12 +999,52 @@ final class NativePrintService: @unchecked Sendable {
     private func appendLogLine(_ line: String) {
         let sink = lock.withLock { () -> (@Sendable (String) -> Void)? in
             logLines.append(line)
+            logRevision += 1
             if logLines.count > 1200 {
                 logLines.removeFirst(logLines.count - 1200)
             }
             return logSink
         }
         sink?(line)
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+        }
+    }
+
+    private func parsedLogs(from lines: [String], revision: Int, fallbackPrinter: String) -> (recentTasks: [RecentTask], printJobs: [PrintJob]) {
+        if let cached = lock.withLock({ parsedLogCache }),
+           cached.logRevision == revision,
+           cached.fallbackPrinter == fallbackPrinter {
+            return (cached.recentTasks, cached.printJobs)
+        }
+
+        let recentTasks = Self.parseRecentTasks(from: lines)
+        let printJobs = Self.parsePrintJobs(from: lines, fallbackPrinter: fallbackPrinter)
+        lock.withLock {
+            parsedLogCache = ParsedLogCache(
+                logRevision: revision,
+                fallbackPrinter: fallbackPrinter,
+                recentTasks: recentTasks,
+                printJobs: printJobs
+            )
+        }
+        return (recentTasks, printJobs)
+    }
+
+    private func printerDevices(defaultPrinterName: String, forceRefresh: Bool) -> [PrinterDevice] {
+        let now = Date()
+        if !forceRefresh,
+           let cached = lock.withLock({ cachedPrinterDevices }),
+           now.timeIntervalSince(lock.withLock({ cachedPrinterDevicesAt })) < printerCacheTTL {
+            return cached
+        }
+
+        let devices = discoverPrinterDevices(defaultPrinterName: defaultPrinterName)
+        lock.withLock {
+            cachedPrinterDevices = devices
+            cachedPrinterDevicesAt = now
+        }
+        return devices
     }
 }
 

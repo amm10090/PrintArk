@@ -122,6 +122,15 @@ final class StatusItemController: NSObject {
     private let restartHandler: () -> Void
     private let openPreviewHandler: () -> Void
     private let quitHandler: () -> Void
+    private var renderedIconState: StatusIconState?
+    private var renderedTooltip: String?
+
+    private struct StatusIconState: Equatable {
+        let hasFailed: Bool
+        let isPrinting: Bool
+        let waitingConnection: Bool
+        let serviceState: ServiceState
+    }
 
     init(
         model: AppModel,
@@ -152,14 +161,21 @@ final class StatusItemController: NSObject {
     func refresh() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.statusItem.button?.image = self.statusBarIcon()
-            self.statusItem.button?.imagePosition = .imageOnly
-            self.statusItem.button?.toolTip = self.statusTooltip
+            let state = self.currentIconState
+            if state != self.renderedIconState {
+                self.statusItem.button?.image = self.statusBarIcon(for: state)
+                self.statusItem.button?.imagePosition = .imageOnly
+                self.renderedIconState = state
+            }
+            let tooltip = self.statusTooltip
+            if tooltip != self.renderedTooltip {
+                self.statusItem.button?.toolTip = tooltip
+                self.renderedTooltip = tooltip
+            }
         }
     }
 
     private func configureStatusItem() {
-        statusItem.button?.image = statusBarIcon()
         statusItem.button?.imagePosition = .imageOnly
         statusItem.button?.toolTip = "印舟"
         statusItem.button?.target = self
@@ -169,16 +185,12 @@ final class StatusItemController: NSObject {
     /// 菜单栏图标三态:空闲(系统模板色打印机)/打印中(蓝色对勾角标)/错误(红色感叹角标)。
     /// 空闲态交给 NSStatusItem 的 template 渲染,才能和其他菜单栏图标一样随系统变白/变黑。
     /// 角标为彩色时整图改为非模板,并把基础打印机实心绘成白色。
-    private func statusBarIcon() -> NSImage {
-        let hasFailed = model.queueJobs.contains { $0.status == .failed }
-        let waitingConnection = model.serviceState == .running && model.activeBrowserConnections == 0
-        let isPrinting = model.queueJobs.contains { $0.status == .printing || $0.status == .queued }
-
+    private func statusBarIcon(for state: StatusIconState) -> NSImage {
         let badge: NSColor?
         let badgeSymbol: String?
-        if hasFailed {
+        if state.hasFailed {
             badge = .systemRed; badgeSymbol = "exclamationmark"
-        } else if isPrinting {
+        } else if state.isPrinting {
             badge = .systemBlue; badgeSymbol = "checkmark"
         } else {
             badge = nil; badgeSymbol = nil
@@ -193,7 +205,7 @@ final class StatusItemController: NSObject {
             weight: .regular,
             color: baseColor
         ) else {
-            return NSImage(systemSymbolName: "printer.fill", accessibilityDescription: statusAccessibilityDescription)
+            return NSImage(systemSymbolName: "printer.fill", accessibilityDescription: statusAccessibilityDescription(for: state))
                 ?? NSImage(size: size)
         }
         let badgeGlyph = badgeSymbol.flatMap {
@@ -225,10 +237,9 @@ final class StatusItemController: NSObject {
                     glyph.draw(in: gRect)
                 }
             }
-            _ = waitingConnection
             return true
         }
-        image.accessibilityDescription = statusAccessibilityDescription
+        image.accessibilityDescription = statusAccessibilityDescription(for: state)
         image.isTemplate = usesTemplateRendering
         return image
     }
@@ -283,24 +294,24 @@ final class StatusItemController: NSObject {
         popover.contentViewController = hosting
     }
 
-    private var statusSymbolName: String {
-        if model.queueJobs.contains(where: { $0.status == .failed }) {
-            return "exclamationmark.triangle.fill"
-        }
-        if model.serviceState == .running && model.activeBrowserConnections == 0 {
-            return "antenna.radiowaves.left.and.right.slash"
-        }
-        return model.serviceState.symbolName
+    private var currentIconState: StatusIconState {
+        let jobs = model.queueJobs
+        return StatusIconState(
+            hasFailed: jobs.contains { $0.status == .failed },
+            isPrinting: jobs.contains { $0.status == .printing || $0.status == .queued },
+            waitingConnection: model.serviceState == .running && model.activeBrowserConnections == 0,
+            serviceState: model.serviceState
+        )
     }
 
-    private var statusAccessibilityDescription: String {
-        if model.queueJobs.contains(where: { $0.status == .failed }) {
+    private func statusAccessibilityDescription(for state: StatusIconState) -> String {
+        if state.hasFailed {
             return "印舟，有失败任务"
         }
-        if model.serviceState == .running && model.activeBrowserConnections == 0 {
+        if state.waitingConnection {
             return "印舟，等待千牛连接"
         }
-        return "印舟，\(model.serviceState.title)"
+        return "印舟，\(state.serviceState.title)"
     }
 
     private var statusTooltip: String {
