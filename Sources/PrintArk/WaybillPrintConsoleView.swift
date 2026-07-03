@@ -6,7 +6,7 @@ struct WaybillPrintConsoleView: View {
 
     var body: some View {
         NavigationSplitView {
-            PrintSidebarView(selection: $sidebarSelection)
+            PrintSidebarView(selection: $sidebarSelection, model: model)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 280)
         } detail: {
             PrintWorkspaceContent(selection: sidebarSelection ?? .currentWaybill, model: model)
@@ -55,35 +55,44 @@ enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
 
 struct PrintSidebarView: View {
     @Binding var selection: PrintSidebarDestination?
+    @ObservedObject var model: AppModel
 
     var body: some View {
-        List(selection: $selection) {
-            Section("打印") {
-                ForEach(PrintSidebarDestination.printItems) { item in
-                    SidebarRow(item: item)
-                        .tag(item)
-                        .help(item.title)
+        VStack(spacing: 0) {
+            List(selection: $selection) {
+                Section("打印") {
+                    ForEach(PrintSidebarDestination.printItems) { item in
+                        SidebarRow(item: item)
+                            .tag(item)
+                            .help(item.title)
+                    }
                 }
-            }
 
-            Section("批量能力") {
-                ForEach(PrintSidebarDestination.batchItems) { item in
-                    SidebarRow(item: item)
-                        .foregroundStyle(item.isImplemented ? .primary : .secondary)
-                        .tag(item)
-                        .help(item.isImplemented ? item.title : "尚未实现")
+                Section("批量能力") {
+                    ForEach(PrintSidebarDestination.batchItems) { item in
+                        SidebarRow(item: item)
+                            .foregroundStyle(item.isImplemented ? .primary : .secondary)
+                            .tag(item)
+                            .help(item.isImplemented ? item.title : "尚未实现")
+                    }
                 }
-            }
 
-            Section("说明") {
-                ForEach(PrintSidebarDestination.infoItems) { item in
-                    SidebarRow(item: item)
-                        .tag(item)
-                        .help(item.title)
+                Section("说明") {
+                    ForEach(PrintSidebarDestination.infoItems) { item in
+                        SidebarRow(item: item)
+                            .tag(item)
+                            .help(item.title)
+                    }
                 }
             }
+            .listStyle(.sidebar)
+
+            Divider()
+
+            SidebarServiceStatusPanel(model: model)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 10)
         }
-        .listStyle(.sidebar)
         .navigationTitle("工作台")
     }
 }
@@ -93,6 +102,147 @@ struct SidebarRow: View {
 
     var body: some View {
         Label(item.title, systemImage: item.systemImage)
+    }
+}
+
+private struct SidebarServiceStatusPanel: View {
+    @ObservedObject var model: AppModel
+
+    private var stateColor: Color {
+        switch model.serviceState {
+        case .running:
+            return .green
+        case .starting, .stopping:
+            return .orange
+        case .error:
+            return .red
+        case .stopped:
+            return .secondary
+        }
+    }
+
+    private var primaryTitle: String {
+        model.serviceState == .running ? "重启服务" : "启动服务"
+    }
+
+    private var primarySymbol: String {
+        model.serviceState == .running ? "arrow.clockwise" : "play.fill"
+    }
+
+    private var isTransitioning: Bool {
+        model.serviceState == .starting || model.serviceState == .stopping
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: model.serviceState.symbolName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(stateColor)
+                    .frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("本机服务")
+                        .font(.caption.weight(.semibold))
+                    Text(model.serviceState.title)
+                        .font(.caption2)
+                        .foregroundStyle(stateColor)
+                }
+
+                Spacer(minLength: 0)
+
+                Text("\(model.activeBrowserConnections) 连接")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(model.ports) { port in
+                    SidebarPortStatusRow(port: port)
+                }
+            }
+
+            Text(model.serviceSummary)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 6) {
+                Button(action: primaryAction) {
+                    Label(primaryTitle, systemImage: primarySymbol)
+                        .lineLimit(1)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(isTransitioning)
+                .help(primaryTitle)
+
+                Button(action: model.stopService) {
+                    Label("停止服务", systemImage: "stop.fill")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.serviceState == .stopped || model.serviceState == .stopping)
+                .help("停止服务")
+
+                Button(action: model.refresh) {
+                    Label("刷新状态", systemImage: "arrow.clockwise")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("刷新状态")
+            }
+        }
+        .padding(10)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private func primaryAction() {
+        if model.serviceState == .running {
+            model.restartService()
+        } else {
+            model.startService()
+        }
+    }
+}
+
+private struct SidebarPortStatusRow: View {
+    let port: PortStatus
+
+    private var color: Color {
+        port.isListening ? .green : .secondary
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+
+            Text(port.label)
+                .font(.caption2.weight(.semibold))
+                .frame(width: 34, alignment: .leading)
+
+            Text("\(port.port)")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+
+            Text(port.stateText)
+                .font(.caption2)
+                .foregroundStyle(color)
+        }
+        .lineLimit(1)
     }
 }
 
