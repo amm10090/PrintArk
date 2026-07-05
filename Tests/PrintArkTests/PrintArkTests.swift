@@ -373,7 +373,9 @@ final class PrintArkTests: XCTestCase {
         let config = PrintServiceConfiguration(
             host: "127.0.0.1",
             webSocketPort: wsPort,
+            secureWebSocketPort: wsPort + 2,
             httpPort: httpPort,
+            wssCertificateMaterial: nil,
             runtimeMode: .defaultPreview,
             autoOpenPreview: false,
             printSettings: settings
@@ -385,7 +387,8 @@ final class PrintArkTests: XCTestCase {
 
         let snapshot = service.snapshot()
         XCTAssertEqual(snapshot.serviceState, .running)
-        XCTAssertEqual(snapshot.ports.count, 2)
+        XCTAssertEqual(snapshot.ports.count, 3)
+        XCTAssertEqual(snapshot.ports.first(where: { $0.label == "WSS" })?.isListening, false)
 
         let fallbackURL = URL(string: "http://127.0.0.1:\(httpPort)/file/missing.pdf")!
         let (data, response) = try URLSession.shared.syncData(from: fallbackURL)
@@ -427,7 +430,9 @@ final class PrintArkTests: XCTestCase {
         let printers = try client.receiveJSON()
         XCTAssertEqual(printers["cmd"] as? String, "getPrinters")
         XCTAssertEqual(printers["status"] as? String, "success")
-        XCTAssertNotNil(printers["printers"] as? [[String: Any]])
+        let printerList = try XCTUnwrap(printers["printers"] as? [[String: Any]])
+        XCTAssertEqual(printerList.first?["name"] as? String, "TAOBAO")
+        XCTAssertEqual(printers["defaultPrinter"] as? String, "TAOBAO")
 
         try client.send(["cmd": "getAgentInfo", "requestID": "RID_AGENT"])
         let agent = try client.receiveJSON()
@@ -437,7 +442,44 @@ final class PrintArkTests: XCTestCase {
         try client.send(["cmd": "getGlobalConfig", "requestID": "RID_GLOBAL"])
         let global = try client.receiveJSON()
         XCTAssertEqual(global["cmd"] as? String, "getGlobalConfig")
-        XCTAssertEqual(global["notifyOnTaskFailure"] as? Bool, true)
+        XCTAssertEqual(global["notifyOnTaskFailure"] as? Bool, false)
+    }
+
+    func testProtocolPrintersPrioritizeTaoBaoForCainiaoCompatibility() {
+        let printers = [
+            PrinterDevice(name: "HP Smart Tank", isDefault: true, isEnabled: true),
+            PrinterDevice(name: "TAOBAO", isDefault: false, isEnabled: true),
+        ]
+
+        let sorted = prioritizeProtocolPrinters(printers, preferredName: "TAOBAO")
+
+        XCTAssertEqual(sorted.map(\.name), ["TAOBAO", "HP Smart Tank"])
+    }
+
+    func testSecureWebSocketProbeUsesSameProtocolHandler() throws {
+        let service = NativePrintService()
+        let ports = randomPortTriple()
+        let material = try makeTemporaryCertificateMaterial()
+        let config = PrintServiceConfiguration(
+            host: "127.0.0.1",
+            webSocketPort: ports.ws,
+            secureWebSocketPort: ports.wss,
+            httpPort: ports.http,
+            wssCertificateMaterial: material,
+            runtimeMode: .defaultPreview,
+            autoOpenPreview: false,
+            printSettings: PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10)
+        )
+
+        XCTAssertEqual(service.start(configuration: config).exitCode, 0)
+        defer { _ = service.stop() }
+
+        let snapshot = service.snapshot()
+        XCTAssertEqual(snapshot.ports.first(where: { $0.label == "WSS" })?.isListening, true)
+
+        let global = try receiveSecureWebSocketJSON(port: ports.wss, object: ["cmd": "getGlobalConfig", "requestID": "RID_WSS"])
+        XCTAssertEqual(global["cmd"] as? String, "getGlobalConfig")
+        XCTAssertEqual(global["notifyOnTaskFailure"] as? Bool, false)
     }
 
     func testWebSocketPreviewFlowMatchesReplayShape() throws {
@@ -710,7 +752,9 @@ final class PrintArkTests: XCTestCase {
         PrintServiceConfiguration(
             host: "127.0.0.1",
             webSocketPort: wsPort,
+            secureWebSocketPort: wsPort + 2,
             httpPort: httpPort,
+            wssCertificateMaterial: nil,
             runtimeMode: runtimeMode,
             autoOpenPreview: false,
             printSettings: PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10)
@@ -720,6 +764,74 @@ final class PrintArkTests: XCTestCase {
     private func randomPortPair() -> (ws: Int, http: Int) {
         let ws = Int.random(in: 25000...32000)
         return (ws, ws + 1)
+    }
+
+    private func randomPortTriple() -> (ws: Int, http: Int, wss: Int) {
+        let ws = Int.random(in: 25000...31900)
+        return (ws, ws + 1, ws + 2)
+    }
+
+    private func makeTemporaryCertificateMaterial() throws -> WSSCertificateMaterial {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("printark-wss-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let cert = directory.appendingPathComponent("server.crt")
+        let key = directory.appendingPathComponent("server.key")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+        process.arguments = [
+            "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-days", "1",
+            "-keyout", key.path,
+            "-out", cert.path,
+            "-subj", "/CN=localhost",
+            "-addext", "subjectAltName=DNS:localhost",
+        ]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        return WSSCertificateMaterial(certificatePath: cert.path, privateKeyPath: key.path)
+    }
+
+    private func receiveSecureWebSocketJSON(port: Int, object: [String: Any]) throws -> [String: Any] {
+        let delegate = TrustingURLSessionDelegate()
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let url = URL(string: "wss://localhost:\(port)/")!
+        let task = session.webSocketTask(with: url)
+        task.resume()
+        let sendSemaphore = DispatchSemaphore(value: 0)
+        let sendBox = LockedErrorBox()
+        let data = try JSONSerialization.data(withJSONObject: object, options: [])
+        let text = String(data: data, encoding: .utf8) ?? "{}"
+        task.send(.string(text)) { error in
+            sendBox.store(error)
+            sendSemaphore.signal()
+        }
+        sendSemaphore.wait()
+        if let error = sendBox.load() { throw error }
+
+        let receiveSemaphore = DispatchSemaphore(value: 0)
+        let receiveBox = LockedWebSocketMessageBox()
+        task.receive { result in
+            receiveBox.store(result)
+            receiveSemaphore.signal()
+        }
+        receiveSemaphore.wait()
+        task.cancel(with: .normalClosure, reason: nil)
+
+        switch try receiveBox.load().get() {
+        case let .string(text):
+            let object = try JSONSerialization.jsonObject(with: Data(text.utf8), options: [])
+            return try XCTUnwrap(object as? [String: Any])
+        case let .data(data):
+            let object = try JSONSerialization.jsonObject(with: data, options: [])
+            return try XCTUnwrap(object as? [String: Any])
+        @unknown default:
+            throw NSError(domain: "PrintArkTests", code: 18, userInfo: [NSLocalizedDescriptionKey: "unknown websocket message"])
+        }
     }
 
     private func jsonObject(_ text: String) throws -> [String: Any] {
@@ -775,6 +887,49 @@ private final class LockedResultBox: @unchecked Sendable {
     }
 }
 
+private final class LockedErrorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var error: Error?
+
+    func store(_ newValue: Error?) {
+        lock.withLock { error = newValue }
+    }
+
+    func load() -> Error? {
+        lock.withLock { error }
+    }
+}
+
+private final class LockedWebSocketMessageBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<URLSessionWebSocketTask.Message, Error>?
+
+    func store(_ newValue: Result<URLSessionWebSocketTask.Message, Error>) {
+        lock.withLock { result = newValue }
+    }
+
+    func load() -> Result<URLSessionWebSocketTask.Message, Error> {
+        lock.withLock {
+            result ?? .failure(NSError(domain: "PrintArkTests", code: 17, userInfo: [NSLocalizedDescriptionKey: "missing websocket result"]))
+        }
+    }
+}
+
+private final class TrustingURLSessionDelegate: NSObject, URLSessionDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
+    }
+}
+
 private final class TestWebSocketClient {
     private let input: InputStream
     private let output: OutputStream
@@ -782,7 +937,8 @@ private final class TestWebSocketClient {
     init(port: Int) throws {
         var inputStream: InputStream?
         var outputStream: OutputStream?
-        Stream.getStreamsToHost(withName: "127.0.0.1", port: port, inputStream: &inputStream, outputStream: &outputStream)
+        let host = "127.0.0.1"
+        Stream.getStreamsToHost(withName: host, port: port, inputStream: &inputStream, outputStream: &outputStream)
         guard let inputStream, let outputStream else {
             throw NSError(domain: "PrintArkTests", code: 10, userInfo: [NSLocalizedDescriptionKey: "cannot create streams"])
         }
@@ -790,7 +946,7 @@ private final class TestWebSocketClient {
         output = outputStream
         input.open()
         output.open()
-        try handshake(port: port)
+        try handshake(host: host, port: port)
     }
 
     func send(_ object: [String: Any]) throws {
@@ -840,10 +996,10 @@ private final class TestWebSocketClient {
         output.close()
     }
 
-    private func handshake(port: Int) throws {
+    private func handshake(host: String, port: Int) throws {
         let request = """
         GET / HTTP/1.1\r
-        Host: 127.0.0.1:\(port)\r
+        Host: \(host):\(port)\r
         Upgrade: websocket\r
         Connection: Upgrade\r
         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r

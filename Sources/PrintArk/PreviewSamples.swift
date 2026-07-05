@@ -86,6 +86,7 @@ enum PreviewSamples {
             model.serviceSummary = "启动中 · 正在检查本机端口"
             model.ports = [
                 PortStatus(id: 13528, port: 13528, label: "WS", isListening: true, listenerCount: 1),
+                PortStatus(id: 13529, port: 13529, label: "WSS", isListening: true, listenerCount: 1),
                 PortStatus(id: 13525, port: 13525, label: "HTTP", isListening: false, listenerCount: 0),
             ]
             model.activeBrowserConnections = 0
@@ -141,11 +142,13 @@ enum PreviewSamples {
 
     static let listeningPorts: [PortStatus] = [
         PortStatus(id: 13528, port: 13528, label: "WS", isListening: true, listenerCount: 1),
+        PortStatus(id: 13529, port: 13529, label: "WSS", isListening: true, listenerCount: 1),
         PortStatus(id: 13525, port: 13525, label: "HTTP", isListening: true, listenerCount: 1),
     ]
 
     static let closedPorts: [PortStatus] = [
         PortStatus(id: 13528, port: 13528, label: "WS", isListening: false, listenerCount: 0),
+        PortStatus(id: 13529, port: 13529, label: "WSS", isListening: false, listenerCount: 0),
         PortStatus(id: 13525, port: 13525, label: "HTTP", isListening: false, listenerCount: 0),
     ]
 

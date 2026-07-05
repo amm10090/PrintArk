@@ -1874,6 +1874,7 @@ struct VersionSummaryCard: View {
             SettingsCard(title: "服务信息", subtitle: "本机服务监听端口与协议兼容版本。") {
                 VStack(alignment: .leading, spacing: 9) {
                     DedupKeyRow("WebSocket 端口：13528")
+                    DedupKeyRow("安全 WebSocket 端口：13529")
                     DedupKeyRow("HTTP 预览端口：13525")
                     DedupKeyRow("协议兼容版本：1.5.3.0")
                 }

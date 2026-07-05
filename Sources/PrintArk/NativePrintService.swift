@@ -5,13 +5,62 @@ import Foundation
 import NIOCore
 import NIOHTTP1
 import NIOPosix
+@preconcurrency import NIOSSL
 import NIOWebSocket
 import PDFKit
+
+struct WSSCertificateMaterial: Sendable, Equatable {
+    var certificatePath: String
+    var privateKeyPath: String
+
+    static func discover() -> WSSCertificateMaterial? {
+        let supportDirectory = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support/PrintArk/cainiao-wss", isDirectory: true)
+        let cached = WSSCertificateMaterial(
+            certificatePath: supportDirectory.appendingPathComponent("server.crt").path,
+            privateKeyPath: supportDirectory.appendingPathComponent("server.key").path
+        )
+        if FileManager.default.fileExists(atPath: cached.certificatePath),
+           FileManager.default.fileExists(atPath: cached.privateKeyPath) {
+            return cached
+        }
+
+        let officialJar = "/Applications/cainiao-x-print.app/Contents/Resources/Xprint.xjar"
+        guard FileManager.default.fileExists(atPath: officialJar) else { return nil }
+        do {
+            try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+            try extractFromZip(zipPath: officialJar, entry: "ca/server.crt", to: URL(fileURLWithPath: cached.certificatePath))
+            try extractFromZip(zipPath: officialJar, entry: "ca/server.key", to: URL(fileURLWithPath: cached.privateKeyPath))
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cached.privateKeyPath)
+            return cached
+        } catch {
+            return nil
+        }
+    }
+
+    private static func extractFromZip(zipPath: String, entry: String, to destination: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        process.arguments = ["-p", zipPath, entry]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0, !data.isEmpty else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        try data.write(to: destination, options: .atomic)
+    }
+}
 
 struct PrintServiceConfiguration: Sendable {
     var host: String = "127.0.0.1"
     var webSocketPort = 13528
+    var secureWebSocketPort = 13529
     var httpPort = 13525
+    var wssCertificateMaterial: WSSCertificateMaterial? = WSSCertificateMaterial.discover()
     var runtimeMode: RuntimeMode
     var autoOpenPreview: Bool
     var printSettings: PrintSettings
@@ -57,7 +106,53 @@ struct PrintServiceEvent: Sendable {
 struct NativeServiceRuntime: Sendable {
     let eventLoopGroup: MultiThreadedEventLoopGroup
     let webSocketChannel: Channel
+    let secureWebSocketChannel: Channel?
     let httpChannel: Channel
+}
+
+private func makeWebSocketBootstrap(group: MultiThreadedEventLoopGroup, service: NativePrintService) -> ServerBootstrap {
+    ServerBootstrap(group: group)
+        .serverChannelOption(ChannelOptions.backlog, value: 128)
+        .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+        .childChannelInitializer { channel in
+            configureCainiaoWebSocketPipeline(channel: channel, service: service)
+        }
+        .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+}
+
+private func makeSecureWebSocketBootstrap(group: MultiThreadedEventLoopGroup, service: NativePrintService, material: WSSCertificateMaterial) throws -> ServerBootstrap {
+    let certificates = try NIOSSLCertificate.fromPEMFile(material.certificatePath)
+    let privateKey = try NIOSSLPrivateKey(file: material.privateKeyPath, format: .pem)
+    var tlsConfiguration = TLSConfiguration.makeServerConfiguration(
+        certificateChain: certificates.map { .certificate($0) },
+        privateKey: .privateKey(privateKey)
+    )
+    tlsConfiguration.minimumTLSVersion = .tlsv12
+    let sslContext = try NIOSSLContext(configuration: tlsConfiguration)
+
+    return ServerBootstrap(group: group)
+        .serverChannelOption(ChannelOptions.backlog, value: 128)
+        .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+        .childChannelInitializer { channel in
+            let tlsHandler = NIOSSLServerHandler(context: sslContext)
+            return channel.pipeline.addHandler(tlsHandler).flatMap {
+                configureCainiaoWebSocketPipeline(channel: channel, service: service)
+            }
+        }
+        .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+}
+
+private func configureCainiaoWebSocketPipeline(channel: Channel, service: NativePrintService) -> EventLoopFuture<Void> {
+    let upgrader = NIOWebSocketServerUpgrader(
+        shouldUpgrade: { _, _ in
+            channel.eventLoop.makeSucceededFuture([:])
+        },
+        upgradePipelineHandler: { channel, _ in
+            channel.pipeline.addHandler(WebSocketProtocolHandler(service: service))
+        }
+    )
+    let config = NIOHTTPServerUpgradeSendableConfiguration(upgraders: [upgrader], completionHandler: { _ in })
+    return channel.pipeline.configureHTTPServerPipeline(withServerUpgrade: config)
 }
 
 final class NativePrintService: @unchecked Sendable {
@@ -127,22 +222,13 @@ final class NativePrintService: @unchecked Sendable {
             let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
             let service = self
 
-            let wsBootstrap = ServerBootstrap(group: group)
-                .serverChannelOption(ChannelOptions.backlog, value: 128)
-                .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
-                .childChannelInitializer { channel in
-                    let upgrader = NIOWebSocketServerUpgrader(
-                        shouldUpgrade: { _, _ in
-                            channel.eventLoop.makeSucceededFuture([:])
-                        },
-                        upgradePipelineHandler: { channel, _ in
-                            channel.pipeline.addHandler(WebSocketProtocolHandler(service: service))
-                        }
-                    )
-                    let config = NIOHTTPServerUpgradeSendableConfiguration(upgraders: [upgrader], completionHandler: { _ in })
-                    return channel.pipeline.configureHTTPServerPipeline(withServerUpgrade: config)
-                }
-                .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            let wsBootstrap = makeWebSocketBootstrap(group: group, service: service)
+            let secureWSBootstrap: ServerBootstrap?
+            if let material = newConfiguration.wssCertificateMaterial {
+                secureWSBootstrap = try makeSecureWebSocketBootstrap(group: group, service: service, material: material)
+            } else {
+                secureWSBootstrap = nil
+            }
 
             let httpBootstrap = ServerBootstrap(group: group)
                 .serverChannelOption(ChannelOptions.backlog, value: 128)
@@ -155,18 +241,36 @@ final class NativePrintService: @unchecked Sendable {
                 .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
 
             let wsChannel = try wsBootstrap.bind(host: newConfiguration.host, port: newConfiguration.webSocketPort).wait()
-            let httpChannel: Channel
+            let secureWSChannel: Channel?
             do {
-                httpChannel = try httpBootstrap.bind(host: newConfiguration.host, port: newConfiguration.httpPort).wait()
+                if let secureWSBootstrap {
+                    secureWSChannel = try secureWSBootstrap.bind(host: newConfiguration.host, port: newConfiguration.secureWebSocketPort).wait()
+                } else {
+                    secureWSChannel = nil
+                }
             } catch {
                 try? wsChannel.close().wait()
                 try? group.syncShutdownGracefully()
                 throw error
             }
+            let httpChannel: Channel
+            do {
+                httpChannel = try httpBootstrap.bind(host: newConfiguration.host, port: newConfiguration.httpPort).wait()
+            } catch {
+                try? wsChannel.close().wait()
+                try? secureWSChannel?.close().wait()
+                try? group.syncShutdownGracefully()
+                throw error
+            }
             lock.withLock {
-                runtime = NativeServiceRuntime(eventLoopGroup: group, webSocketChannel: wsChannel, httpChannel: httpChannel)
+                runtime = NativeServiceRuntime(eventLoopGroup: group, webSocketChannel: wsChannel, secureWebSocketChannel: secureWSChannel, httpChannel: httpChannel)
             }
             appendLog("Native WebSocket listening on ws://\(newConfiguration.host):\(newConfiguration.webSocketPort)/")
+            if secureWSChannel != nil {
+                appendLog("Native secure WebSocket listening on wss://localhost:\(newConfiguration.secureWebSocketPort)/")
+            } else {
+                appendLog("Native secure WebSocket disabled: Cainiao localhost certificate material not found")
+            }
             appendLog("Native HTTP preview listening on http://\(newConfiguration.host):\(newConfiguration.httpPort)/file/<pdf>")
             emit("connection", [
             "phase": .string("service-start"),
@@ -194,6 +298,7 @@ final class NativePrintService: @unchecked Sendable {
 
         do {
             try current.webSocketChannel.close().wait()
+            try current.secureWebSocketChannel?.close().wait()
             try current.httpChannel.close().wait()
             try current.eventLoopGroup.syncShutdownGracefully()
             emit("connection", [
@@ -222,7 +327,9 @@ final class NativePrintService: @unchecked Sendable {
             configuration = PrintServiceConfiguration(
                 host: configuration.host,
                 webSocketPort: configuration.webSocketPort,
+                secureWebSocketPort: configuration.secureWebSocketPort,
                 httpPort: configuration.httpPort,
+                wssCertificateMaterial: configuration.wssCertificateMaterial,
                 runtimeMode: configuration.runtimeMode,
                 autoOpenPreview: configuration.autoOpenPreview,
                 printSettings: settings
@@ -272,8 +379,10 @@ final class NativePrintService: @unchecked Sendable {
         let lines = stateValues.3
         let revision = stateValues.4
         let running = isRunning
+        let secureWebSocketRunning = lock.withLock { runtime?.secureWebSocketChannel != nil }
         let ports = [
             PortStatus(id: config.webSocketPort, port: config.webSocketPort, label: "WS", isListening: running, listenerCount: running ? 1 : 0),
+            PortStatus(id: config.secureWebSocketPort, port: config.secureWebSocketPort, label: "WSS", isListening: running && secureWebSocketRunning, listenerCount: running && secureWebSocketRunning ? 1 : 0),
             PortStatus(id: config.httpPort, port: config.httpPort, label: "HTTP", isListening: running, listenerCount: running ? 1 : 0),
         ]
         let parsedLogs = parsedLogs(from: lines, revision: revision, fallbackPrinter: config.printSettings.printerName)
@@ -377,7 +486,7 @@ final class NativePrintService: @unchecked Sendable {
                 "requestID": .string(requestID),
                 "status": .string("success"),
                 "msg": .string("no error"),
-                "notifyOnTaskFailure": .bool(true),
+                "notifyOnTaskFailure": .bool(false),
                 "ignoreFontCanNotDisplay": .bool(true),
                 "errorCode": .number(0),
             ], on: channel)
@@ -2018,11 +2127,28 @@ private func discoverPrinterDevices(defaultPrinterName configuredDefault: String
 
 private func discoverProtocolPrinters() -> [PrinterDevice] {
     let configName = PrintSettings.current.printerName
-    return discoverPrinterDevices(defaultPrinterName: configName)
+    return prioritizeProtocolPrinters(discoverPrinterDevices(defaultPrinterName: configName), preferredName: configName)
 }
 
 private func defaultPrinterName(from printers: [PrinterDevice]) -> String {
     printers.first(where: \.isDefault)?.name ?? printers.first?.name ?? "TAOBAO"
+}
+
+func prioritizeProtocolPrinters(_ printers: [PrinterDevice], preferredName: String = "TAOBAO") -> [PrinterDevice] {
+    func rank(_ printer: PrinterDevice) -> Int {
+        if printer.name == preferredName || printer.name == "TAOBAO" { return 0 }
+        if printer.isDefault { return 1 }
+        if printer.isEnabled { return 2 }
+        return 3
+    }
+    return printers.enumerated()
+        .sorted {
+            let leftRank = rank($0.element)
+            let rightRank = rank($1.element)
+            if leftRank != rightRank { return leftRank < rightRank }
+            return $0.offset < $1.offset
+        }
+        .map(\.element)
 }
 
 private func modificationDate(_ url: URL) -> Date {

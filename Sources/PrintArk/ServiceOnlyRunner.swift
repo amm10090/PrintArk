@@ -23,6 +23,7 @@ enum ServiceOnlyRunner {
         let configuration = PrintServiceConfiguration(
             host: value(after: "--host", in: arguments) ?? "127.0.0.1",
             webSocketPort: Int(value(after: "--ws-port", in: arguments) ?? "13528") ?? 13528,
+            secureWebSocketPort: Int(value(after: "--wss-port", in: arguments) ?? "13529") ?? 13529,
             httpPort: Int(value(after: "--http-port", in: arguments) ?? "13525") ?? 13525,
             runtimeMode: runtimeMode,
             autoOpenPreview: autoOpenPreview,
