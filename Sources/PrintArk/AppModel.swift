@@ -354,10 +354,13 @@ final class AppModel: NSObject, ObservableObject {
     private var logViewerLineBaseline = 0
     private var lastRawLogLineCount = 0
     private var lastAppliedSnapshotToken: SupervisorSnapshotToken?
+    private var lastWakeRestartAt: Date?
 
     private static let fallbackRefreshInterval: TimeInterval = 20
     private static let fallbackRefreshTolerance: TimeInterval = 5
     private static let eventRefreshDebounce: TimeInterval = 0.18
+    private static let wakeRestartDebounce: TimeInterval = 10
+    private static let wakeRestartDelayNanoseconds: UInt64 = 1_500_000_000
 
     var onRefresh: (() -> Void)?
 
@@ -369,6 +372,17 @@ final class AppModel: NSObject, ObservableObject {
             name: NativePrintService.didChangeNotification,
             object: printService
         )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(workspaceDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     /// 让本机服务的事件日志同时写到标准输出，方便在 Xcode 控制台 / 终端实时查看。
@@ -636,6 +650,35 @@ final class AppModel: NSObject, ObservableObject {
     @objc private func eventRefreshTimerFired(_ sender: Timer) {
         eventRefreshTimer = nil
         refreshIfChanged()
+    }
+
+    @objc private func workspaceDidWake(_ notification: Notification) {
+        scheduleWakeRestart()
+    }
+
+    private func scheduleWakeRestart() {
+        let now = Date()
+        if let lastWakeRestartAt, now.timeIntervalSince(lastWakeRestartAt) < Self.wakeRestartDebounce {
+            return
+        }
+        lastWakeRestartAt = now
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.wakeRestartDelayNanoseconds)
+            self?.restartServiceAfterWake()
+        }
+    }
+
+    private func restartServiceAfterWake() {
+        guard printService.snapshot().pidIsAlive else { return }
+        let result = printService.restart(configuration: PrintServiceConfiguration.current(
+            runtimeMode: UserDefaults.standard.bool(forKey: SettingsKeys.debugPreview) ? .defaultPreview : .respectPreviewFlag,
+            autoOpenPreview: UserDefaults.standard.object(forKey: SettingsKeys.autoOpenPreview) as? Bool ?? true,
+            printSettings: resolvedPrintSettings()
+        ))
+        lastActionOutput = result.exitCode == 0
+            ? "从睡眠唤醒后已自动重启本机服务，清理浏览器旧连接"
+            : "唤醒后自动重启服务失败：\(result.output)"
+        apply(snapshot: printService.snapshot(forcePrinterRefresh: true), onlyIfChanged: false)
     }
 
     @objc private func nativeServiceDidChange(_ notification: Notification) {
