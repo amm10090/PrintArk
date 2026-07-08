@@ -243,6 +243,7 @@ private struct SidebarPortStatusRow: View {
                 .foregroundStyle(color)
         }
         .lineLimit(1)
+        .help(port.ownerDescription ?? "\(port.label) \(port.stateText)")
     }
 }
 

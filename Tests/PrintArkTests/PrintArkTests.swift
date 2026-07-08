@@ -456,6 +456,41 @@ final class PrintArkTests: XCTestCase {
         XCTAssertEqual(sorted.map(\.name), ["TAOBAO", "HP Smart Tank"])
     }
 
+    func testCainiaoPortOwnerDetection() {
+        let officialJava = PortOccupancy(
+            port: 13529,
+            pid: 123,
+            processName: "java",
+            commandLine: "jre/bin/java -jar Xprint.xjar"
+        )
+        let officialLauncher = PortOccupancy(
+            port: 13528,
+            pid: 124,
+            processName: "cainiao-x-print",
+            commandLine: "/Applications/cainiao-x-print.app/Contents/MacOS/cainiao-x-print"
+        )
+        let unknown = PortOccupancy(
+            port: 13525,
+            pid: 125,
+            processName: "node",
+            commandLine: "node server.js"
+        )
+
+        XCTAssertTrue(officialJava.isKnownCainiaoComponent)
+        XCTAssertTrue(officialLauncher.isKnownCainiaoComponent)
+        XCTAssertFalse(unknown.isKnownCainiaoComponent)
+
+        let occupied = PortStatus(
+            id: 13529,
+            port: 13529,
+            label: "WSS",
+            isListening: false,
+            listenerCount: 1,
+            ownerDescription: officialJava.displayText
+        )
+        XCTAssertEqual(occupied.stateText, "占用")
+    }
+
     func testSecureWebSocketProbeUsesSameProtocolHandler() throws {
         let service = NativePrintService()
         let ports = randomPortTriple()

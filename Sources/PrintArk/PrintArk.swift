@@ -50,6 +50,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
+
         statusItemController = StatusItemController(
             model: model,
             openSettings: { [weak self] in self?.showSettingsWindow() },
@@ -71,6 +78,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor) {
+        let urlText = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue ?? ""
+        appendDeepLinkLog(urlText)
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -107,6 +119,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsWindowController = controller
         controller.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func appendDeepLinkLog(_ urlText: String) {
+        let preview = Self.redactDeepLinkPreview(urlText)
+        let line = "\(Self.deepLinkTimestamp()) recv cnprint url length=\(urlText.count) preview=\(preview)\n"
+        do {
+            let directory = NativePrintService.persistentLogURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: NativePrintService.persistentLogURL.path) {
+                try Data(line.utf8).write(to: NativePrintService.persistentLogURL, options: .atomic)
+                return
+            }
+            let handle = try FileHandle(forWritingTo: NativePrintService.persistentLogURL)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(line.utf8))
+        } catch {
+            print("deep link log failed: \(error.localizedDescription)")
+        }
+    }
+
+    private static func redactDeepLinkPreview(_ text: String) -> String {
+        let limited = String(text.prefix(1200))
+        return limited
+            .replacingOccurrences(of: #"\b1[3-9]\d{9}\b"#, with: "[REDACTED_PHONE]", options: .regularExpression)
+            .replacingOccurrences(of: #"[A-Za-z0-9+/=]{80,}"#, with: "[REDACTED_PAYLOAD]", options: .regularExpression)
+    }
+
+    private static func deepLinkTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return formatter.string(from: Date())
     }
 }
 

@@ -1,6 +1,7 @@
 import AppKit
 import CryptoSwift
 import CryptoKit
+import Darwin
 import Foundation
 import NIOCore
 import NIOHTTP1
@@ -110,6 +111,23 @@ struct NativeServiceRuntime: Sendable {
     let httpChannel: Channel
 }
 
+struct PortOccupancy: Equatable {
+    let port: Int
+    let pid: Int
+    let processName: String
+    let commandLine: String
+
+    var displayText: String {
+        let name = processName.isEmpty ? "pid \(pid)" : processName
+        return "\(port): \(name) (\(pid))"
+    }
+
+    var isKnownCainiaoComponent: Bool {
+        let text = "\(processName) \(commandLine)".lowercased()
+        return text.contains("cainiao-x-print") || text.contains("xprint.xjar")
+    }
+}
+
 private func makeWebSocketBootstrap(group: MultiThreadedEventLoopGroup, service: NativePrintService) -> ServerBootstrap {
     ServerBootstrap(group: group)
         .serverChannelOption(ChannelOptions.backlog, value: 128)
@@ -157,6 +175,9 @@ private func configureCainiaoWebSocketPipeline(channel: Channel, service: Native
 
 final class NativePrintService: @unchecked Sendable {
     static let didChangeNotification = Notification.Name("PrintArk.NativePrintService.didChange")
+    static let persistentLogURL = URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent("Library/Application Support/PrintArk/logs", isDirectory: true)
+        .appendingPathComponent("printark.log")
 
     private let lock = NSLock()
     private var runtime: NativeServiceRuntime?
@@ -195,6 +216,78 @@ final class NativePrintService: @unchecked Sendable {
         let printJobs: [PrintJob]
     }
 
+    static func portOccupancies(ports: [Int]) -> [PortOccupancy] {
+        let uniquePorts = Array(Set(ports)).sorted()
+        var results: [PortOccupancy] = []
+        for port in uniquePorts {
+            let output = runProcess(
+                executable: "/usr/sbin/lsof",
+                arguments: ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN", "-F", "pc"]
+            )
+            guard output.exitCode == 0 else { continue }
+            var currentPID: Int?
+            var currentName = ""
+            for rawLine in output.output.split(separator: "\n", omittingEmptySubsequences: true) {
+                let line = String(rawLine)
+                guard let marker = line.first else { continue }
+                let value = String(line.dropFirst())
+                switch marker {
+                case "p":
+                    currentPID = Int(value)
+                    currentName = ""
+                case "c":
+                    currentName = value
+                    if let pid = currentPID {
+                        results.append(PortOccupancy(
+                            port: port,
+                            pid: pid,
+                            processName: currentName,
+                            commandLine: processCommandLine(pid: pid)
+                        ))
+                    }
+                default:
+                    continue
+                }
+            }
+        }
+        return results
+    }
+
+    static func describeOccupancies(_ occupancies: [PortOccupancy]) -> String {
+        occupancies
+            .sorted { lhs, rhs in
+                lhs.port == rhs.port ? lhs.pid < rhs.pid : lhs.port < rhs.port
+            }
+            .map(\.displayText)
+            .joined(separator: ", ")
+    }
+
+    private static func processCommandLine(pid: Int) -> String {
+        let output = runProcess(
+            executable: "/bin/ps",
+            arguments: ["-p", "\(pid)", "-o", "command="]
+        )
+        guard output.exitCode == 0 else { return "" }
+        return output.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func runProcess(executable: String, arguments: [String]) -> (exitCode: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        } catch {
+            return (1, "")
+        }
+    }
+
     var latestPreviewPDF: URL? {
         lock.withLock {
             latestRenderedPDF
@@ -215,6 +308,19 @@ final class NativePrintService: @unchecked Sendable {
 
         if isRunning {
             return CommandResult(exitCode: 0, output: "native service already running")
+        }
+
+        let desiredPorts = [
+            newConfiguration.webSocketPort,
+            newConfiguration.secureWebSocketPort,
+            newConfiguration.httpPort,
+        ]
+        let unresolvedOccupancies = releaseKnownCainiaoPortOwnersIfNeeded(ports: desiredPorts)
+        if !unresolvedOccupancies.isEmpty {
+            let message = "端口被其他程序占用：\(Self.describeOccupancies(unresolvedOccupancies))"
+            appendLog("Native service start blocked: \(message)")
+            lock.withLock { lastError = message }
+            return CommandResult(exitCode: 1, output: "native service failed: \(message)")
         }
 
         do {
@@ -369,6 +475,48 @@ final class NativePrintService: @unchecked Sendable {
         return true
     }
 
+    private func releaseKnownCainiaoPortOwnersIfNeeded(ports: [Int]) -> [PortOccupancy] {
+        let occupancies = Self.portOccupancies(ports: ports)
+        guard !occupancies.isEmpty else { return [] }
+
+        let unknown = occupancies.filter { !$0.isKnownCainiaoComponent }
+        guard unknown.isEmpty else { return occupancies }
+
+        appendLog("Official Cainiao component is occupying local print ports; terminating before PrintArk starts: \(Self.describeOccupancies(occupancies))")
+        let pids = Set(occupancies.map(\.pid))
+        for pid in pids {
+            kill(pid_t(pid), SIGTERM)
+        }
+        Thread.sleep(forTimeInterval: 0.8)
+
+        var remaining = Self.portOccupancies(ports: ports)
+        let stillOfficial = remaining.filter(\.isKnownCainiaoComponent)
+        if !stillOfficial.isEmpty {
+            for pid in Set(stillOfficial.map(\.pid)) {
+                kill(pid_t(pid), SIGKILL)
+            }
+            Thread.sleep(forTimeInterval: 0.4)
+            remaining = Self.portOccupancies(ports: ports)
+        }
+
+        if remaining.isEmpty {
+            appendLog("Released official Cainiao port owner; PrintArk will bind local print ports")
+        }
+        return remaining
+    }
+
+    private func portStatus(port: Int, label: String, isListening: Bool, occupancies: [PortOccupancy]) -> PortStatus {
+        let owner = occupancies.isEmpty ? nil : Self.describeOccupancies(occupancies)
+        return PortStatus(
+            id: port,
+            port: port,
+            label: label,
+            isListening: isListening,
+            listenerCount: isListening ? 1 : occupancies.count,
+            ownerDescription: owner
+        )
+    }
+
     func snapshot(forcePrinterRefresh: Bool = false) -> SupervisorSnapshot {
         let stateValues = lock.withLock {
             (configuration, lastError, activeConnections, logLines, logRevision)
@@ -380,10 +528,17 @@ final class NativePrintService: @unchecked Sendable {
         let revision = stateValues.4
         let running = isRunning
         let secureWebSocketRunning = lock.withLock { runtime?.secureWebSocketChannel != nil }
+        let externalOccupancies = running
+            ? [:]
+            : Dictionary(grouping: Self.portOccupancies(ports: [
+                config.webSocketPort,
+                config.secureWebSocketPort,
+                config.httpPort,
+            ]), by: \.port)
         let ports = [
-            PortStatus(id: config.webSocketPort, port: config.webSocketPort, label: "WS", isListening: running, listenerCount: running ? 1 : 0),
-            PortStatus(id: config.secureWebSocketPort, port: config.secureWebSocketPort, label: "WSS", isListening: running && secureWebSocketRunning, listenerCount: running && secureWebSocketRunning ? 1 : 0),
-            PortStatus(id: config.httpPort, port: config.httpPort, label: "HTTP", isListening: running, listenerCount: running ? 1 : 0),
+            portStatus(port: config.webSocketPort, label: "WS", isListening: running, occupancies: externalOccupancies[config.webSocketPort] ?? []),
+            portStatus(port: config.secureWebSocketPort, label: "WSS", isListening: running && secureWebSocketRunning, occupancies: externalOccupancies[config.secureWebSocketPort] ?? []),
+            portStatus(port: config.httpPort, label: "HTTP", isListening: running, occupancies: externalOccupancies[config.httpPort] ?? []),
         ]
         let parsedLogs = parsedLogs(from: lines, revision: revision, fallbackPrinter: config.printSettings.printerName)
         let tasks = parsedLogs.recentTasks
@@ -521,15 +676,19 @@ final class NativePrintService: @unchecked Sendable {
         }
     }
 
-    func connectionOpened() {
+    func connectionOpened(remoteAddress: String? = nil) {
         let count = lock.withLock { () -> Int in
             activeConnections += 1
             return activeConnections
         }
-        emit("connection", [
+        var fields: [String: JSONValue] = [
             "phase": .string("open"),
             "activeConnections": .number(Double(count)),
-        ])
+        ]
+        if let remoteAddress {
+            fields["remoteAddress"] = .string(remoteAddress)
+        }
+        emit("connection", fields)
     }
 
     func connectionClosed(_ reason: String) {
@@ -1106,6 +1265,7 @@ final class NativePrintService: @unchecked Sendable {
     }
 
     private func appendLogLine(_ line: String) {
+        appendPersistentLogLine(line)
         let sink = lock.withLock { () -> (@Sendable (String) -> Void)? in
             logLines.append(line)
             logRevision += 1
@@ -1118,6 +1278,30 @@ final class NativePrintService: @unchecked Sendable {
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
         }
+    }
+
+    private func appendPersistentLogLine(_ line: String) {
+        let timestamped = "\(nowTimestamp()) \(line)\n"
+        let data = Data(timestamped.utf8)
+        do {
+            let directory = Self.persistentLogURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            if !FileManager.default.fileExists(atPath: Self.persistentLogURL.path) {
+                try data.write(to: Self.persistentLogURL, options: .atomic)
+                return
+            }
+            let handle = try FileHandle(forWritingTo: Self.persistentLogURL)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch {
+            sinkPersistentLogFailure(error)
+        }
+    }
+
+    private func sinkPersistentLogFailure(_ error: Error) {
+        let sink = lock.withLock { logSink }
+        sink?("persistent log write failed: \(error.localizedDescription)")
     }
 
     private func parsedLogs(from lines: [String], revision: Int, fallbackPrinter: String) -> (recentTasks: [RecentTask], printJobs: [PrintJob]) {
@@ -1164,6 +1348,7 @@ private final class WebSocketProtocolHandler: ChannelInboundHandler, @unchecked 
     private weak var service: NativePrintService?
     private var buffer = ByteBuffer()
     private var opened = false
+    private var remoteAddress: String?
 
     init(service: NativePrintService) {
         self.service = service
@@ -1171,7 +1356,8 @@ private final class WebSocketProtocolHandler: ChannelInboundHandler, @unchecked 
 
     func handlerAdded(context: ChannelHandlerContext) {
         opened = true
-        service?.connectionOpened()
+        remoteAddress = context.remoteAddress.map(String.init(describing:))
+        service?.connectionOpened(remoteAddress: remoteAddress)
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -1202,7 +1388,7 @@ private final class WebSocketProtocolHandler: ChannelInboundHandler, @unchecked 
     func channelInactive(context: ChannelHandlerContext) {
         if opened {
             opened = false
-            service?.connectionClosed("close")
+            service?.connectionClosed(remoteAddress.map { "close \($0)" } ?? "close")
         }
     }
 }

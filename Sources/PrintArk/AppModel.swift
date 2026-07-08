@@ -68,7 +68,7 @@ enum SettingsMigration {
 /// build 脚本的 Info.plist（CFBundleShortVersionString）需人工对齐同一字面。
 /// 注意：协议伪装字段（getAgentInfo 的 "1.5.3.0"）不是 App 版本，与此无关。
 enum AppInfo {
-    static let version = "1.1.10"
+    static let version = "1.1.11"
 
     /// 构建日期（本地化短日期）。以可执行文件的修改时间作为编译期代理——
     /// `.app` 包与 `swift run` 都能取到，无需编译期注入宏。
@@ -184,8 +184,13 @@ struct PortStatus: Identifiable, Equatable {
     let label: String
     let isListening: Bool
     let listenerCount: Int
+    var ownerDescription: String? = nil
 
-    var stateText: String { isListening ? "监听" : "关闭" }
+    var stateText: String {
+        if isListening { return "监听" }
+        if ownerDescription != nil { return "占用" }
+        return "关闭"
+    }
 }
 
 struct RecentTask: Identifiable {
