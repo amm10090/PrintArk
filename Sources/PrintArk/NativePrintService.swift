@@ -300,6 +300,10 @@ final class NativePrintService: @unchecked Sendable {
         }
     }
 
+    func appendDiagnosticLog(_ line: String) {
+        appendLog(line)
+    }
+
     func start(configuration newConfiguration: PrintServiceConfiguration) -> CommandResult {
         lock.withLock {
             configuration = newConfiguration

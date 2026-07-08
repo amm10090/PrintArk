@@ -68,7 +68,7 @@ enum SettingsMigration {
 /// build 脚本的 Info.plist（CFBundleShortVersionString）需人工对齐同一字面。
 /// 注意：协议伪装字段（getAgentInfo 的 "1.5.3.0"）不是 App 版本，与此无关。
 enum AppInfo {
-    static let version = "1.1.11"
+    static let version = "1.1.12"
 
     /// 构建日期（本地化短日期）。以可执行文件的修改时间作为编译期代理——
     /// `.app` 包与 `swift run` 都能取到，无需编译期注入宏。
@@ -176,6 +176,54 @@ enum ServiceAction: String {
     case start
     case stop
     case restart
+}
+
+struct OfficialCainiaoWarmup {
+    static let appPath = "/Applications/cainiao-x-print.app"
+    static let requiredPorts = [13525, 13528, 13529]
+    static let timeout: TimeInterval = 9
+    static let settleDelay: TimeInterval = 1.2
+
+    static var isAvailable: Bool {
+        FileManager.default.fileExists(atPath: appPath)
+    }
+
+    static func runIfAvailable(log: (String) -> Void) {
+        guard isAvailable else {
+            log("Official Cainiao warmup skipped: \(appPath) not found")
+            return
+        }
+
+        log("Official Cainiao warmup starting")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-gj", appPath]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            log("Official Cainiao warmup failed to launch: \(error.localizedDescription)")
+            return
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            let occupancies = NativePrintService.portOccupancies(ports: requiredPorts)
+            let officialPorts = Set(occupancies.filter(\.isKnownCainiaoComponent).map(\.port))
+            if requiredPorts.allSatisfy({ officialPorts.contains($0) }) {
+                log("Official Cainiao warmup ready: \(NativePrintService.describeOccupancies(occupancies))")
+                Thread.sleep(forTimeInterval: settleDelay)
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+
+        let occupancies = NativePrintService.portOccupancies(ports: requiredPorts)
+        let description = occupancies.isEmpty ? "no listeners" : NativePrintService.describeOccupancies(occupancies)
+        log("Official Cainiao warmup timed out: \(description)")
+    }
 }
 
 struct PortStatus: Identifiable, Equatable {
@@ -366,6 +414,8 @@ final class AppModel: NSObject, ObservableObject {
     private static let eventRefreshDebounce: TimeInterval = 0.18
     private static let wakeRestartDebounce: TimeInterval = 10
     private static let wakeRestartDelayNanoseconds: UInt64 = 1_500_000_000
+    private static let officialWarmupCooldown: TimeInterval = 60
+    private var lastOfficialWarmupAt: Date?
 
     var onRefresh: (() -> Void)?
 
@@ -566,6 +616,15 @@ final class AppModel: NSObject, ObservableObject {
             autoOpenPreview: autoOpenPreview,
             printSettings: printSettings
         )
+        let restartStopResult: CommandResult?
+        if action == .restart {
+            restartStopResult = printService.stop()
+        } else {
+            restartStopResult = nil
+        }
+        if action != .stop {
+            warmOfficialCainiaoIfNeeded()
+        }
         let result: CommandResult
         switch action {
         case .start:
@@ -573,7 +632,12 @@ final class AppModel: NSObject, ObservableObject {
         case .stop:
             result = printService.stop()
         case .restart:
-            result = printService.restart(configuration: configuration)
+            let startResult = printService.start(configuration: configuration)
+            let output = [restartStopResult?.output, startResult.output]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+            result = CommandResult(exitCode: startResult.exitCode, output: output)
         }
         lastActionOutput = result.output.isEmpty ? "命令已执行" : result.output
         apply(snapshot: printService.snapshot(forcePrinterRefresh: true), onlyIfChanged: false)
@@ -675,6 +739,9 @@ final class AppModel: NSObject, ObservableObject {
 
     private func restartServiceAfterWake() {
         guard printService.snapshot().pidIsAlive else { return }
+        printService.appendDiagnosticLog("Wake recovery warming official Cainiao component before PrintArk restart")
+        _ = printService.stop()
+        warmOfficialCainiaoIfNeeded(force: true)
         let result = printService.restart(configuration: PrintServiceConfiguration.current(
             runtimeMode: UserDefaults.standard.bool(forKey: SettingsKeys.debugPreview) ? .defaultPreview : .respectPreviewFlag,
             autoOpenPreview: UserDefaults.standard.object(forKey: SettingsKeys.autoOpenPreview) as? Bool ?? true,
@@ -688,5 +755,20 @@ final class AppModel: NSObject, ObservableObject {
 
     @objc private func nativeServiceDidChange(_ notification: Notification) {
         scheduleEventRefresh()
+    }
+
+    private func warmOfficialCainiaoIfNeeded(force: Bool = false) {
+        let now = Date()
+        if !force,
+           let lastOfficialWarmupAt,
+           now.timeIntervalSince(lastOfficialWarmupAt) < Self.officialWarmupCooldown {
+            return
+        }
+        lastOfficialWarmupAt = now
+        serviceSummary = "启动中 • 菜鸟官方组件暖机"
+        printService.appendDiagnosticLog("Preparing official Cainiao warmup before PrintArk binds local ports")
+        OfficialCainiaoWarmup.runIfAvailable { [printService] line in
+            printService.appendDiagnosticLog(line)
+        }
     }
 }
