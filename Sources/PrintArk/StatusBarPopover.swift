@@ -27,6 +27,11 @@ enum StatusMenuStyle {
     static let selectedBackground = Color(nsColor: .systemBlue).opacity(0.12)
     static let menuSurface = Color(nsColor: .windowBackgroundColor).opacity(0.55)
 
+    // 服务状态条 / 分组标题
+    static let statusBarSurface = Color.primary.opacity(0.04)
+    static let groupHeaderText = Color.secondary
+    static let progressTrack = Color.primary.opacity(0.10)
+
     // 错误态
     static let errorSurface = Color(nsColor: .systemRed).opacity(0.07)
     static let errorBorder = Color(nsColor: .systemRed).opacity(0.22)
@@ -36,16 +41,15 @@ enum StatusMenuStyle {
     static let skeletonShine = Color.primary.opacity(0.12)
 
     static let menuWidth: CGFloat = 360
-    static let listMaxHeight: CGFloat = 392
+    static let listMaxHeight: CGFloat = 372
     /// 弹窗整体固定高度。根视图、popover.contentSize、NSHostingController 三处共用此单一来源,
     /// 消除“声明尺寸 vs 固有尺寸”冲突导致的 NSPopover 锚定错位。
-    static let menuHeight: CGFloat = 520
+    static let menuHeight: CGFloat = 540
 
     // 入场动画曲线（设计稿 cubic-bezier(0.16,1,0.3,1) 的近似）
     static let entrance = Animation.spring(response: 0.34, dampingFraction: 0.82)
-    static let perItemStagger = 0.028
+    static let perItemStagger = 0.024
 }
-
 // MARK: - 相对时间
 
 enum RelativeTime {
@@ -94,6 +98,58 @@ private extension QueueJobStatus {
     }
 }
 
+// MARK: - 队列分组
+
+/// 弹窗内的三个折叠分组。进行中(排队+打印) / 失败 / 已完成，失败优先展示以便及时处理。
+enum QueueGroup: String, CaseIterable, Identifiable {
+    case active
+    case failed
+    case done
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .active: return "进行中"
+        case .failed: return "失败"
+        case .done: return "已完成"
+        }
+    }
+
+    var accent: Color {
+        switch self {
+        case .active: return StatusMenuStyle.blue
+        case .failed: return StatusMenuStyle.red
+        case .done: return StatusMenuStyle.green
+        }
+    }
+
+    func contains(_ status: QueueJobStatus) -> Bool {
+        switch self {
+        case .active: return status == .printing || status == .queued
+        case .failed: return status == .failed
+        case .done: return status == .done
+        }
+    }
+}
+
+// MARK: - 服务状态映射
+
+private extension ServiceState {
+    /// 状态指示圆点颜色。
+    var indicatorColor: Color {
+        switch self {
+        case .running: return StatusMenuStyle.green
+        case .starting, .stopping: return StatusMenuStyle.orange
+        case .stopped: return StatusMenuStyle.gray
+        case .error: return StatusMenuStyle.red
+        }
+    }
+
+    /// 是否需要脉冲动画（过渡态）。
+    var isTransient: Bool { self == .starting || self == .stopping }
+}
+
 // MARK: - 右键上下文菜单动作
 
 enum StatusMenuAction {
@@ -113,7 +169,6 @@ struct StatusBarPopoverActions {
     var openPreferences: () -> Void
     var quit: () -> Void
 }
-
 // MARK: - 根视图
 
 struct StatusBarPopoverView: View {
@@ -124,6 +179,7 @@ struct StatusBarPopoverView: View {
 
     @State private var selectedID: QueueJob.ID?
     @State private var expandedErrorIDs: Set<QueueJob.ID> = []
+    @State private var collapsedGroups: Set<QueueGroup> = [.done]
     @State private var didAppear = false
 
     // 右键浮层
@@ -144,22 +200,21 @@ struct StatusBarPopoverView: View {
     private var showsSkeleton: Bool { !model.hasLoadedOnce }
     private var showsEmpty: Bool { model.hasLoadedOnce && jobs.isEmpty }
 
-    private var counts: (printing: Int, done: Int, failed: Int) {
-        var p = 0, d = 0, f = 0
-        for job in jobs {
-            switch job.status {
-            case .printing, .queued: p += 1
-            case .done: d += 1
-            case .failed: f += 1
-            }
-        }
-        return (p, d, f)
+    /// 分组后的任务：保持 menuBarQueueJobs 原有顺序，仅按组切片。
+    private func jobs(in group: QueueGroup) -> [QueueJob] {
+        jobs.filter { group.contains($0.status) }
+    }
+
+    /// 当前可见（未折叠分组内）任务的扁平序列，供键盘上下键导航。
+    private var visibleJobs: [QueueJob] {
+        QueueGroup.allCases
+            .filter { !collapsedGroups.contains($0) }
+            .flatMap { jobs(in: $0) }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().overlay(StatusMenuStyle.separator)
+            serviceStatusBar
             content
             Divider().overlay(StatusMenuStyle.separator)
             footer
@@ -173,54 +228,70 @@ struct StatusBarPopoverView: View {
         .onAppear(perform: handleAppear)
         .onDisappear(perform: handleDisappear)
     }
+    // MARK: 服务状态条
 
-    // MARK: 头部
+    /// 顶部单行仪表盘：状态圆点 + 服务态 + 端口 + 浏览器连接数。
+    private var serviceStatusBar: some View {
+        HStack(spacing: 9) {
+            StatusIndicatorDot(
+                color: model.serviceState.indicatorColor,
+                pulsing: model.serviceState.isTransient && !reduceMotion
+            )
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("打印队列")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(StatusMenuStyle.labelSecondary)
-                .kerning(0.4)
-                .textCase(.uppercase)
+            Text(model.serviceState.title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(StatusMenuStyle.labelPrimary)
 
-            HStack(spacing: 16) {
-                if showsSkeleton {
-                    summaryBadge(color: StatusMenuStyle.gray, count: nil, label: "正在同步…")
-                } else {
-                    summaryBadge(color: StatusMenuStyle.blue, count: counts.printing, label: "打印中")
-                    summaryBadge(color: StatusMenuStyle.green, count: counts.done, label: "完成")
-                    summaryBadge(color: StatusMenuStyle.red, count: counts.failed, label: "失败")
+            if let ws = wsPort {
+                metadataDot
+                Text(":\(ws)")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(StatusMenuStyle.labelSecondary)
+            }
+
+            Spacer(minLength: 0)
+
+            if model.serviceState == .running {
+                HStack(spacing: 4) {
+                    Image(systemName: "personalhotspot").font(.system(size: 10))
+                    Text("\(model.activeBrowserConnections) 连接")
+                        .font(.system(size: 11, weight: .medium))
+                        .monospacedDigit()
                 }
-                Spacer(minLength: 0)
+                .foregroundStyle(model.activeBrowserConnections > 0 ? StatusMenuStyle.blue : StatusMenuStyle.labelTertiary)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(StatusMenuStyle.menuSurface)
+        .padding(.horizontal, 14)
+        .frame(height: 42)
+        .background(StatusMenuStyle.statusBarSurface)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(StatusMenuStyle.separator).frame(height: 0.5)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(serviceAccessibilityText)
     }
 
-    private func summaryBadge(color: Color, count: Int?, label: String) -> some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-                .overlay(Circle().stroke(Color.gray.opacity(0.2), lineWidth: 1.5))
-            if let count {
-                Text("\(count)").font(.system(size: 11, weight: .semibold)).foregroundColor(StatusMenuStyle.labelPrimary)
-                + Text(" \(label)").font(.system(size: 11)).foregroundColor(StatusMenuStyle.labelSecondary)
-            } else {
-                Text(label).font(.system(size: 11)).foregroundStyle(StatusMenuStyle.labelSecondary)
-            }
-        }
-        .monospacedDigit()
+    /// 从 ports 里取 WebSocket 端口；缺失时回退协议固定的 13528。
+    private var wsPort: Int? {
+        model.ports.first { $0.label.uppercased().hasPrefix("WS") && !$0.label.uppercased().hasPrefix("WSS") }?.port
+            ?? model.ports.first { $0.label.uppercased() == "WSS" }?.port
+            ?? (model.serviceState == .running ? 13528 : nil)
+    }
+
+    private var metadataDot: some View {
+        Circle().fill(StatusMenuStyle.labelTertiary).frame(width: 2.5, height: 2.5)
+    }
+
+    private var serviceAccessibilityText: String {
+        var parts = ["服务\(model.serviceState.title)"]
+        if let ws = wsPort { parts.append("端口 \(ws)") }
+        if model.serviceState == .running { parts.append("\(model.activeBrowserConnections) 个浏览器连接") }
+        return parts.joined(separator: "，")
     }
 
     // MARK: 内容区（三态）
 
-    // 根视图整体固定 menuHeight,内容区填充 header/footer 之间的剩余空间。
+    // 根视图整体固定 menuHeight,内容区填充状态条/footer 之间的剩余空间。
     // 三态(骨架/空/列表)都在此区域内,弹窗总尺寸恒定,NSPopover 锚定确定。
     private var content: some View {
         Group {
@@ -234,11 +305,36 @@ struct StatusBarPopoverView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-
     private var queueList: some View {
         ScrollView {
-            VStack(spacing: 6) {
-                ForEach(Array(jobs.enumerated()), id: \.element.id) { index, job in
+            VStack(spacing: 10) {
+                ForEach(QueueGroup.allCases) { group in
+                    let groupJobs = jobs(in: group)
+                    if !groupJobs.isEmpty {
+                        groupSection(group, jobs: groupJobs)
+                    }
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            .padding(.bottom, 10)
+        }
+        .frame(maxHeight: StatusMenuStyle.listMaxHeight)
+    }
+
+    @ViewBuilder
+    private func groupSection(_ group: QueueGroup, jobs groupJobs: [QueueJob]) -> some View {
+        let collapsed = collapsedGroups.contains(group)
+        VStack(spacing: 6) {
+            GroupHeaderView(
+                group: group,
+                count: groupJobs.count,
+                collapsed: collapsed,
+                onToggle: { toggleGroup(group) }
+            )
+
+            if !collapsed {
+                ForEach(Array(groupJobs.enumerated()), id: \.element.id) { index, job in
                     QueueItemView(
                         job: job,
                         isSelected: selectedID == job.id,
@@ -247,20 +343,27 @@ struct StatusBarPopoverView: View {
                         onTap: { select(job) },
                         onRightClick: { point in openContextMenu(at: point, job: job) }
                     )
-                    .opacity(itemShown(index) ? 1 : 0)
-                    .offset(y: itemShown(index) ? 0 : 6)
+                    .opacity(didAppear || reduceMotion ? 1 : 0)
+                    .offset(y: didAppear || reduceMotion ? 0 : 6)
                     .animation(
-                        reduceMotion ? nil : StatusMenuStyle.entrance.delay(0.09 + Double(index) * StatusMenuStyle.perItemStagger),
+                        reduceMotion ? nil : StatusMenuStyle.entrance.delay(0.08 + Double(index) * StatusMenuStyle.perItemStagger),
                         value: didAppear
                     )
                 }
             }
-            .padding(8)
         }
-        .frame(maxHeight: StatusMenuStyle.listMaxHeight)
     }
 
-    private func itemShown(_ index: Int) -> Bool { didAppear || reduceMotion }
+    private func toggleGroup(_ group: QueueGroup) {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.86)) {
+            if collapsedGroups.contains(group) {
+                collapsedGroups.remove(group)
+            } else {
+                collapsedGroups.insert(group)
+            }
+        }
+        closeContextMenu()
+    }
 
     private var skeletonList: some View {
         VStack(spacing: 6) {
@@ -272,29 +375,29 @@ struct StatusBarPopoverView: View {
 
     private var emptyState: some View {
         VStack(spacing: 0) {
-            Image(systemName: "tray")
+            Image(systemName: model.serviceState == .running ? "tray" : "pause.circle")
                 .font(.system(size: 44, weight: .regular))
                 .foregroundStyle(StatusMenuStyle.labelSecondary.opacity(0.5))
                 .padding(.bottom, 16)
-            Text("暂无打印任务")
+            Text(model.serviceState == .running ? "暂无打印任务" : "服务未运行")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(StatusMenuStyle.labelPrimary)
                 .padding(.bottom, 6)
-            Text("队列为空，等待新的打印任务到来")
+            Text(model.serviceState == .running ? "队列为空，等待新的打印任务到来" : "启动服务后即可接收 Taobao / 千牛的打印请求")
                 .font(.system(size: 12))
                 .foregroundStyle(StatusMenuStyle.labelSecondary)
+                .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 56)
+        .padding(.vertical, 52)
         .padding(.horizontal, 32)
     }
-
     // MARK: 底部菜单
 
     private var footer: some View {
         VStack(spacing: 0) {
             MenuFooterItem(symbol: "checkmark", title: "清空已完成", shortcut: nil) {
-                let n = counts.done
+                let n = jobs(in: .done).count
                 model.clearCompleted()
                 showToast(n > 0 ? "已清空 \(n) 个已完成任务" : "没有可清空的已完成任务")
             }
@@ -329,7 +432,7 @@ struct StatusBarPopoverView: View {
     }
 
     private var clampedContextY: CGFloat {
-        max(8, contextPoint.y)
+        max(8, min(contextPoint.y, StatusMenuStyle.menuHeight - 240))
     }
 
     // MARK: Toast
@@ -344,13 +447,12 @@ struct StatusBarPopoverView: View {
                 .padding(.vertical, 10)
                 .background(Color.black.opacity(0.86), in: Capsule())
                 .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
-                .padding(.bottom, 16)
+                .padding(.bottom, 70)
                 .opacity(toastVisible ? 1 : 0)
                 .offset(y: toastVisible ? 0 : 16)
                 .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.8), value: toastVisible)
         }
     }
-
     // MARK: 行为
 
     private func handleAppear() {
@@ -358,6 +460,8 @@ struct StatusBarPopoverView: View {
         contextVisible = false
         contextTarget = nil
         didAppear = false
+        // 有失败任务时自动展开失败组，方便立刻看到。
+        if !jobs(in: .failed).isEmpty { collapsedGroups.remove(.failed) }
         if reduceMotion {
             didAppear = true
         } else {
@@ -446,7 +550,6 @@ struct StatusBarPopoverView: View {
         toastWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: work)
     }
-
     // MARK: 键盘导航
 
     private func installKeyMonitor() {
@@ -492,19 +595,92 @@ struct StatusBarPopoverView: View {
     }
 
     private var currentJob: QueueJob? {
-        guard let selectedID else { return jobs.first }
-        return jobs.first { $0.id == selectedID }
+        let list = visibleJobs
+        guard let selectedID else { return list.first }
+        return list.first { $0.id == selectedID } ?? list.first
     }
 
     private func moveSelection(_ delta: Int) {
-        guard !jobs.isEmpty else { return }
-        let currentIndex = jobs.firstIndex { $0.id == selectedID } ?? -1
-        let next = max(0, min(jobs.count - 1, currentIndex + delta))
-        selectedID = jobs[next].id
+        let list = visibleJobs
+        guard !list.isEmpty else { return }
+        let currentIndex = list.firstIndex { $0.id == selectedID } ?? -1
+        let next = max(0, min(list.count - 1, currentIndex + delta))
+        selectedID = list[next].id
         closeContextMenu()
     }
 }
+// MARK: - 服务状态指示圆点
 
+/// 带光晕的服务状态圆点，过渡态时脉冲呼吸。
+private struct StatusIndicatorDot: View {
+    let color: Color
+    let pulsing: Bool
+
+    @State private var animate = false
+
+    var body: some View {
+        Circle()
+            .fill(color)
+            .frame(width: 9, height: 9)
+            .overlay(
+                Circle()
+                    .stroke(color.opacity(0.35), lineWidth: 4)
+                    .scaleEffect(animate ? 1.9 : 1)
+                    .opacity(animate ? 0 : 0.7)
+            )
+            .shadow(color: color.opacity(0.6), radius: 3)
+            .onAppear {
+                guard pulsing else { return }
+                withAnimation(.easeOut(duration: 1.1).repeatForever(autoreverses: false)) { animate = true }
+            }
+    }
+}
+
+// MARK: - 分组标题
+
+/// 可点击折叠的分组标题：三角指示 + 名称 + 计数徽章。
+private struct GroupHeaderView: View {
+    let group: QueueGroup
+    let count: Int
+    let collapsed: Bool
+    let onToggle: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 7) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(StatusMenuStyle.labelTertiary)
+                    .rotationEffect(.degrees(collapsed ? 0 : 90))
+
+                Text(group.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(StatusMenuStyle.groupHeaderText)
+                    .kerning(0.3)
+                    .textCase(.uppercase)
+
+                Text("\(count)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(group.accent)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(group.accent.opacity(0.14), in: Capsule())
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .background(hovering ? StatusMenuStyle.hoverBackground : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityLabel("\(group.title)，\(count) 个任务，\(collapsed ? "已折叠" : "已展开")")
+    }
+}
 // MARK: - 队列卡片
 
 struct QueueItemView: View {
@@ -518,6 +694,7 @@ struct QueueItemView: View {
     @State private var hovering = false
 
     private var isError: Bool { job.status == .failed }
+    private var showsProgress: Bool { job.status == .printing }
 
     var body: some View {
         GeometryReader { geo in
@@ -533,9 +710,10 @@ struct QueueItemView: View {
     }
 
     private var cardHeight: CGFloat {
-        // 行高随是否展开错误条变化（用于 GeometryReader 容器固定高）。
-        let base: CGFloat = isError ? 64 : 60
-        return base + (isError && errorExpanded ? 38 : 0)
+        var base: CGFloat = 60
+        if showsProgress { base += 10 }
+        if isError && errorExpanded { base += 38 }
+        return base
     }
 
     private var cardBody: some View {
@@ -570,6 +748,10 @@ struct QueueItemView: View {
                 Spacer(minLength: 0)
             }
             .monospacedDigit()
+
+            if showsProgress {
+                QueueProgressBar(progress: job.progress)
+            }
 
             if isError, errorExpanded, let error = job.errorMessage, !error.isEmpty {
                 HStack(alignment: .top, spacing: 6) {
@@ -621,6 +803,41 @@ struct QueueItemView: View {
     }
 }
 
+// MARK: - 进度条
+
+/// 打印中任务的细进度条。progress<=0 时退化为不确定态的轻微流光，否则显示确定进度。
+private struct QueueProgressBar: View {
+    let progress: Double
+
+    @State private var sweep = false
+
+    private var determinate: Bool { progress > 0.001 }
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            ZStack(alignment: .leading) {
+                Capsule().fill(StatusMenuStyle.progressTrack)
+                if determinate {
+                    Capsule()
+                        .fill(StatusMenuStyle.blue)
+                        .frame(width: max(4, width * CGFloat(min(1, progress))))
+                        .animation(.easeInOut(duration: 0.3), value: progress)
+                } else {
+                    Capsule()
+                        .fill(StatusMenuStyle.blue)
+                        .frame(width: width * 0.35)
+                        .offset(x: sweep ? width * 0.65 : -width * 0.35)
+                }
+            }
+        }
+        .frame(height: 3)
+        .onAppear {
+            guard !determinate else { return }
+            withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) { sweep = true }
+        }
+    }
+}
 // MARK: - 状态药丸徽章
 
 private struct StatusPill: View {
@@ -722,7 +939,6 @@ private struct MenuFooterItem: View {
         .onHover { hovering = $0 }
     }
 }
-
 // MARK: - 右键上下文菜单
 
 private struct StatusContextMenu: View {
@@ -821,7 +1037,6 @@ struct RightClickCatcher: NSViewRepresentable {
         }
     }
 }
-
 #if DEBUG
 @MainActor
 private func previewActions() -> StatusBarPopoverActions {
@@ -846,3 +1061,15 @@ private func previewActions() -> StatusBarPopoverActions {
     return StatusBarPopoverView(model: model, actions: previewActions())
 }
 #endif
+
+
+
+
+
+
+
+
+
+
+
+
