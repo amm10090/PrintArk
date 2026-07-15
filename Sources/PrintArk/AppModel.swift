@@ -68,7 +68,7 @@ enum SettingsMigration {
 /// build 脚本的 Info.plist（CFBundleShortVersionString）需人工对齐同一字面。
 /// 注意：协议伪装字段（getAgentInfo 的 "1.5.3.0"）不是 App 版本，与此无关。
 enum AppInfo {
-    static let version = "1.1.12"
+    static let version = "1.1.13"
 
     /// 构建日期（本地化短日期）。以可执行文件的修改时间作为编译期代理——
     /// `.app` 包与 `swift run` 都能取到，无需编译期注入宏。
@@ -176,54 +176,6 @@ enum ServiceAction: String {
     case start
     case stop
     case restart
-}
-
-struct OfficialCainiaoWarmup {
-    static let appPath = "/Applications/cainiao-x-print.app"
-    static let requiredPorts = [13525, 13528, 13529]
-    static let timeout: TimeInterval = 9
-    static let settleDelay: TimeInterval = 1.2
-
-    static var isAvailable: Bool {
-        FileManager.default.fileExists(atPath: appPath)
-    }
-
-    static func runIfAvailable(log: (String) -> Void) {
-        guard isAvailable else {
-            log("Official Cainiao warmup skipped: \(appPath) not found")
-            return
-        }
-
-        log("Official Cainiao warmup starting")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-gj", appPath]
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            log("Official Cainiao warmup failed to launch: \(error.localizedDescription)")
-            return
-        }
-
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            let occupancies = NativePrintService.portOccupancies(ports: requiredPorts)
-            let officialPorts = Set(occupancies.filter(\.isKnownCainiaoComponent).map(\.port))
-            if requiredPorts.allSatisfy({ officialPorts.contains($0) }) {
-                log("Official Cainiao warmup ready: \(NativePrintService.describeOccupancies(occupancies))")
-                Thread.sleep(forTimeInterval: settleDelay)
-                return
-            }
-            Thread.sleep(forTimeInterval: 0.25)
-        }
-
-        let occupancies = NativePrintService.portOccupancies(ports: requiredPorts)
-        let description = occupancies.isEmpty ? "no listeners" : NativePrintService.describeOccupancies(occupancies)
-        log("Official Cainiao warmup timed out: \(description)")
-    }
 }
 
 struct PortStatus: Identifiable, Equatable {
@@ -384,6 +336,9 @@ final class AppModel: NSObject, ObservableObject {
     @Published var latestPreviewPDF: URL?
     @Published var lastActionOutput: String = ""
     @Published var lastRefreshedText: String = "从未刷新"
+    @Published var nativeHandshakeState: NativeHandshakeState = .idle
+    @Published var localTLSTrustState: LocalTLSTrustState = .missing
+    @Published var isInstallingLocalTLSCertificate = false
 
     /// 菜单栏弹窗中被用户隐藏（删除/清空已完成）的 QueueJob.id。持久化到 UserDefaults，避免重启后“复活”。
     /// 队列为派生只读状态（每 2s 从事件日志重算），删除语义是“从弹窗视图移除”而非抹掉底层审计日志。
@@ -402,20 +357,38 @@ final class AppModel: NSObject, ObservableObject {
     @Published var bakedCalibration: PrinterCalibration = .identity
 
     private let printService = NativePrintService()
+    private let localTLSIdentityManager = LocalTLSIdentityManager()
     private var pollingTimer: Timer?
     private var eventRefreshTimer: Timer?
     private var logViewerLineBaseline = 0
     private var lastRawLogLineCount = 0
     private var lastAppliedSnapshotToken: SupervisorSnapshotToken?
     private var lastWakeRestartAt: Date?
+    private var handshakeGeneration = 0
 
     private static let fallbackRefreshInterval: TimeInterval = 20
     private static let fallbackRefreshTolerance: TimeInterval = 5
     private static let eventRefreshDebounce: TimeInterval = 0.18
     private static let wakeRestartDebounce: TimeInterval = 10
     private static let wakeRestartDelayNanoseconds: UInt64 = 1_500_000_000
-    private static let officialWarmupCooldown: TimeInterval = 60
-    private var lastOfficialWarmupAt: Date?
+
+    private lazy var handshakeCoordinator: NativeHandshakeCoordinator = {
+        let service = printService
+        let eventSink: @Sendable (NativeHandshakeEvent) -> Void = { event in
+            service.appendNativeHandshakeEvent(event)
+        }
+        guard let credentials = CainiaoHandshakeCredentials.load() else {
+            return NativeHandshakeCoordinator(operation: nil, eventSink: eventSink)
+        }
+        let client = CainiaoHandshakeClient(
+            credentials: credentials,
+            transport: URLSessionCainiaoHandshakeTransport()
+        )
+        return NativeHandshakeCoordinator(
+            operation: { try await client.perform() },
+            eventSink: eventSink
+        )
+    }()
 
     var onRefresh: (() -> Void)?
 
@@ -599,6 +572,7 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     private func launchService(action: ServiceAction) {
+        handshakeGeneration &+= 1
         // 调试预览开关是唯一的用户概念：关闭=真实物理打印，开启=仅生成 PDF 预览。
         // 它在这里翻译为底层 runtimeMode + dryRun，CLI（--service-only）路径不受影响。
         let debugPreview = UserDefaults.standard.bool(forKey: SettingsKeys.debugPreview)
@@ -622,9 +596,6 @@ final class AppModel: NSObject, ObservableObject {
         } else {
             restartStopResult = nil
         }
-        if action != .stop {
-            warmOfficialCainiaoIfNeeded()
-        }
         let result: CommandResult
         switch action {
         case .start:
@@ -644,6 +615,11 @@ final class AppModel: NSObject, ObservableObject {
         if result.exitCode != 0 {
             serviceState = .error
             serviceSummary = "错误 • \(lastActionOutput)"
+        } else if action == .stop {
+            nativeHandshakeState = .idle
+        } else {
+            refreshLocalTLSTrustState()
+            triggerNativeHandshake(reason: action == .restart ? .manualRestart : .startup)
         }
     }
 
@@ -673,7 +649,7 @@ final class AppModel: NSObject, ObservableObject {
         }
         lastAppliedSnapshotToken = snapshot.token
         serviceState = snapshot.serviceState
-        serviceSummary = snapshot.serviceSummary
+        serviceSummary = combinedServiceSummary(snapshot.serviceSummary)
         ports = snapshot.ports
         activeBrowserConnections = snapshot.activeBrowserConnections
         recentTasks = Array(snapshot.recentTasks.prefix(20))
@@ -739,36 +715,103 @@ final class AppModel: NSObject, ObservableObject {
 
     private func restartServiceAfterWake() {
         guard printService.snapshot().pidIsAlive else { return }
-        printService.appendDiagnosticLog("Wake recovery warming official Cainiao component before PrintArk restart")
-        _ = printService.stop()
-        warmOfficialCainiaoIfNeeded(force: true)
+        handshakeGeneration &+= 1
+        printService.appendDiagnosticLog("Wake recovery restarting PrintArk listeners before native handshake")
         let result = printService.restart(configuration: PrintServiceConfiguration.current(
             runtimeMode: UserDefaults.standard.bool(forKey: SettingsKeys.debugPreview) ? .defaultPreview : .respectPreviewFlag,
             autoOpenPreview: UserDefaults.standard.object(forKey: SettingsKeys.autoOpenPreview) as? Bool ?? true,
             printSettings: resolvedPrintSettings()
         ))
         lastActionOutput = result.exitCode == 0
-            ? "从睡眠唤醒后已自动重启本机服务，清理浏览器旧连接"
+            ? "从睡眠唤醒后已自动重启本机服务并刷新原生握手"
             : "唤醒后自动重启服务失败：\(result.output)"
         apply(snapshot: printService.snapshot(forcePrinterRefresh: true), onlyIfChanged: false)
+        if result.exitCode == 0 {
+            refreshLocalTLSTrustState()
+            triggerNativeHandshake(reason: .wake)
+        }
     }
 
     @objc private func nativeServiceDidChange(_ notification: Notification) {
         scheduleEventRefresh()
     }
 
-    private func warmOfficialCainiaoIfNeeded(force: Bool = false) {
-        let now = Date()
-        if !force,
-           let lastOfficialWarmupAt,
-           now.timeIntervalSince(lastOfficialWarmupAt) < Self.officialWarmupCooldown {
-            return
+    func installLocalTLSCertificate() {
+        guard !isInstallingLocalTLSCertificate else { return }
+        isInstallingLocalTLSCertificate = true
+        lastActionOutput = "正在安装本机安全证书…"
+        let manager = localTLSIdentityManager
+        Task.detached { [weak self] in
+            let result = manager.installTrust()
+            let trustState = manager.trustState()
+            await MainActor.run {
+                guard let self else { return }
+                self.isInstallingLocalTLSCertificate = false
+                self.localTLSTrustState = trustState
+                self.lastActionOutput = result.message
+            }
         }
-        lastOfficialWarmupAt = now
-        serviceSummary = "启动中 • 菜鸟官方组件暖机"
-        printService.appendDiagnosticLog("Preparing official Cainiao warmup before PrintArk binds local ports")
-        OfficialCainiaoWarmup.runIfAvailable { [printService] line in
-            printService.appendDiagnosticLog(line)
+    }
+
+    func refreshLocalTLSTrustState() {
+        let manager = localTLSIdentityManager
+        Task.detached { [weak self] in
+            let state = manager.trustState()
+            await MainActor.run {
+                self?.localTLSTrustState = state
+            }
+        }
+    }
+
+    private func triggerNativeHandshake(reason: NativeHandshakeReason) {
+        nativeHandshakeState = .running
+        serviceSummary = combinedServiceSummary(printService.snapshot().serviceSummary)
+        let coordinator = handshakeCoordinator
+        let generation = handshakeGeneration
+        Task { @MainActor [weak self] in
+            let state = await coordinator.trigger(reason: reason)
+            guard let self,
+                  Self.shouldApplyNativeHandshakeResult(
+                      generation: generation,
+                      currentGeneration: self.handshakeGeneration,
+                      serviceState: self.serviceState
+                  ) else { return }
+            self.nativeHandshakeState = state
+            self.serviceSummary = self.combinedServiceSummary(self.printService.snapshot().serviceSummary)
+            switch state {
+            case .ready:
+                self.lastActionOutput = "原生菜鸟握手已完成"
+            case .credentialsMissing:
+                self.lastActionOutput = "本地服务已启动，但远端握手凭据缺失"
+            case let .failed(category):
+                self.lastActionOutput = "本地服务已启动，远端握手失败：\(category)"
+            case .idle, .running:
+                break
+            }
+        }
+    }
+
+    static func shouldApplyNativeHandshakeResult(
+        generation: Int,
+        currentGeneration: Int,
+        serviceState: ServiceState
+    ) -> Bool {
+        generation == currentGeneration && serviceState == .running
+    }
+
+    private func combinedServiceSummary(_ base: String) -> String {
+        guard serviceState == .running else { return base }
+        switch nativeHandshakeState {
+        case .idle:
+            return base
+        case .running:
+            return "\(base) • 原生握手中"
+        case .ready:
+            return "\(base) • 原生握手正常"
+        case .failed:
+            return "\(base) • 原生握手失败"
+        case .credentialsMissing:
+            return "\(base) • 握手凭据缺失"
         }
     }
 }

@@ -10,7 +10,7 @@ DISPLAY_NAME="印舟"
 BUNDLE_ID="local.printark.app"
 MIN_SYSTEM_VERSION="13.0"
 # App 版本号：须与代码常量 AppInfo.version 字面对齐（单一数据源约定）。
-APP_VERSION="1.1.12"
+APP_VERSION="1.1.13"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -20,6 +20,8 @@ APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$BINARY_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+CREDENTIALS_RESOURCE="$APP_RESOURCES/CainiaoHandshake.plist"
+PRIVATE_CREDENTIALS_FILE="${PRINTARK_CAINIAO_CREDENTIALS_FILE:-$HOME/Library/Application Support/PrintArk/build-secrets/CainiaoHandshake.plist}"
 ICON_SOURCE="$ROOT_DIR/assets/AppIcon.png"
 ICON_NAME="AppIcon"
 
@@ -33,6 +35,27 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+
+# 远端握手凭据只从私有构建输入注入，不进入源码或构建日志。
+CAINIAO_APP_KEY="${PRINTARK_CAINIAO_APP_KEY:-}"
+CAINIAO_APP_SECRET="${PRINTARK_CAINIAO_APP_SECRET:-}"
+if [[ (-z "$CAINIAO_APP_KEY" || -z "$CAINIAO_APP_SECRET") && -f "$PRIVATE_CREDENTIALS_FILE" ]]; then
+  CAINIAO_APP_KEY="$(/usr/libexec/PlistBuddy -c 'Print :appKey' "$PRIVATE_CREDENTIALS_FILE" 2>/dev/null || true)"
+  CAINIAO_APP_SECRET="$(/usr/libexec/PlistBuddy -c 'Print :appSecret' "$PRIVATE_CREDENTIALS_FILE" 2>/dev/null || true)"
+fi
+
+if [[ -n "$CAINIAO_APP_KEY" && -n "$CAINIAO_APP_SECRET" ]]; then
+  mkdir -p "$APP_RESOURCES"
+  /usr/bin/plutil -create xml1 "$CREDENTIALS_RESOURCE"
+  /usr/bin/plutil -insert appKey -string "$CAINIAO_APP_KEY" "$CREDENTIALS_RESOURCE"
+  /usr/bin/plutil -insert appSecret -string "$CAINIAO_APP_SECRET" "$CREDENTIALS_RESOURCE"
+  chmod 600 "$CREDENTIALS_RESOURCE"
+elif [[ "${PRINTARK_REQUIRE_CAINIAO_CREDENTIALS:-0}" == "1" ]]; then
+  echo "missing PrintArk Cainiao handshake build credentials" >&2
+  exit 1
+else
+  echo "warning: building without Cainiao handshake credentials; local listeners remain available" >&2
+fi
 
 # 由源 PNG 生成 .icns 并放入 Resources；缺源图时跳过（Dock 退回通用图标）。
 HAS_ICON=0

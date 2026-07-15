@@ -1873,11 +1873,23 @@ struct VersionSummaryCard: View {
             UpdateCheckCard(updater: updater, autoCheckUpdate: $autoCheckUpdate)
 
             SettingsCard(title: "服务信息", subtitle: "本机服务监听端口与协议兼容版本。") {
-                VStack(alignment: .leading, spacing: 9) {
+                VStack(alignment: .leading, spacing: 10) {
                     DedupKeyRow("WebSocket 端口：13528")
                     DedupKeyRow("安全 WebSocket 端口：13529")
                     DedupKeyRow("HTTP 预览端口：13525")
                     DedupKeyRow("协议兼容版本：1.5.3.0")
+                    DedupKeyRow("远端握手：\(model.nativeHandshakeState.displayText)")
+                    DedupKeyRow("安全证书：\(model.localTLSTrustState.displayText)")
+
+                    if model.localTLSTrustState != .trusted {
+                        Button(action: model.installLocalTLSCertificate) {
+                            Label(
+                                model.isInstallingLocalTLSCertificate ? "正在安装" : "安装本机证书",
+                                systemImage: "checkmark.shield"
+                            )
+                        }
+                        .disabled(model.isInstallingLocalTLSCertificate)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }

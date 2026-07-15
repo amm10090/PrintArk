@@ -2,6 +2,200 @@ import XCTest
 @testable import PrintArk
 
 final class PrintArkTests: XCTestCase {
+    func testHandshakeCredentialsRejectMissingValues() {
+        XCTAssertNil(CainiaoHandshakeCredentials(appKey: "", appSecret: "secret"))
+        XCTAssertNil(CainiaoHandshakeCredentials(appKey: "key", appSecret: ""))
+        XCTAssertEqual(
+            CainiaoHandshakeCredentials(appKey: " key ", appSecret: " secret "),
+            CainiaoHandshakeCredentials(appKey: "key", appSecret: "secret")
+        )
+    }
+
+    func testMachineIdentityPersistsGUIDAndUsesStableFallbackMAC() throws {
+        let suite = "PrintArkTests.Handshake.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let provider = DefaultCainiaoMachineIdentityProvider(defaults: defaults, macAddressProvider: { nil })
+
+        let first = provider.resolve()
+        let second = provider.resolve()
+
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.guid, defaults.string(forKey: DefaultCainiaoMachineIdentityProvider.guidDefaultsKey))
+        XCTAssertEqual(first.macAddress.split(separator: ":").count, 6)
+        XCTAssertEqual(first.protocolValue, "\(first.guid)|\(first.macAddress)")
+    }
+
+    func testCurrentHandshakeIdentityAndEnvironmentUseOwnedValues() throws {
+        let suite = "PrintArkTests.LiveHandshakeIdentity.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let identity = DefaultCainiaoMachineIdentityProvider(defaults: defaults).resolve()
+        let environment = CainiaoHandshakeEnvironment.current()
+
+        let macParts = identity.macAddress.split(separator: ":")
+        XCTAssertEqual(macParts.count, 6)
+        XCTAssertTrue(macParts.allSatisfy { $0.count == 2 && UInt8($0, radix: 16) != nil })
+        XCTAssertFalse(environment.architecture.isEmpty)
+        XCTAssertFalse(environment.lanIP.isEmpty)
+    }
+
+    func testHandshakeRequestUsesExpectedShapeAndDoesNotSignJSONData() throws {
+        let credentials = try XCTUnwrap(CainiaoHandshakeCredentials(appKey: "test-key", appSecret: "test-secret"))
+        let identity = CainiaoMachineIdentity(guid: "guid-1", macAddress: "02:00:00:00:00:01")
+        let date = Date(timeIntervalSince1970: 1_782_883_200)
+        let builder = CainiaoHandshakeRequestBuilder(
+            credentials: credentials,
+            identity: identity,
+            environment: CainiaoHandshakeEnvironment(system: "Mac OS X", architecture: "arm64", lanIP: "192.0.2.10"),
+            date: date
+        )
+
+        let request = try builder.makeURLRequest()
+        let body = try XCTUnwrap(String(data: try XCTUnwrap(request.httpBody), encoding: .utf8))
+        let form = parseFormBody(body)
+
+        XCTAssertEqual(request.url, CainiaoHandshakeRequestBuilder.endpoint)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.timeoutInterval, 60)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "User-Agent"), "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:221.0) Gecko/20100101 Firefox/31.0")
+        XCTAssertEqual(form["method"], CainiaoHandshakeRequestBuilder.method)
+        XCTAssertEqual(form["app_key"], "test-key")
+        XCTAssertEqual(form["mac"], identity.protocolValue)
+        XCTAssertNotNil(form["sign"])
+        XCTAssertFalse(body.contains("test-secret"))
+
+        let jsonData = try XCTUnwrap(form["json_data"]?.data(using: .utf8))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: jsonData) as? [String: Any])
+        XCTAssertEqual(json["mac"] as? String, identity.protocolValue)
+        XCTAssertEqual(json["architecture"] as? String, "arm64")
+        XCTAssertEqual(json["lan_ip"] as? String, "192.0.2.10")
+
+        var common = form
+        common.removeValue(forKey: "json_data")
+        common.removeValue(forKey: "sign")
+        XCTAssertEqual(form["sign"], builder.signature(for: common))
+        XCTAssertEqual(form["sign"], form["sign"]?.uppercased())
+    }
+
+    func testHandshakeResponseParserRequiresExpectedDataNode() throws {
+        let valid = Data(#"{"cainiao_waybillprint_clientupdate_getconfig_response":{"result":{"data":{}}}}"#.utf8)
+        let missing = Data(#"{"cainiao_waybillprint_clientupdate_getconfig_response":{"result":{}}}"#.utf8)
+
+        XCTAssertTrue(CainiaoHandshakeClient<StubHandshakeTransport>.hasExpectedResponseShape(valid))
+        XCTAssertFalse(CainiaoHandshakeClient<StubHandshakeTransport>.hasExpectedResponseShape(missing))
+        XCTAssertFalse(CainiaoHandshakeClient<StubHandshakeTransport>.hasExpectedResponseShape(Data("bad".utf8)))
+    }
+
+    func testHandshakeClientRejectsHTTPFailureWithoutReadingBusinessConfig() async throws {
+        let credentials = try XCTUnwrap(CainiaoHandshakeCredentials(appKey: "key", appSecret: "secret"))
+        let response = try XCTUnwrap(HTTPURLResponse(url: CainiaoHandshakeRequestBuilder.endpoint, statusCode: 503, httpVersion: nil, headerFields: nil))
+        let client = CainiaoHandshakeClient(
+            credentials: credentials,
+            identityProvider: FixedHandshakeIdentityProvider(),
+            environmentProvider: { CainiaoHandshakeEnvironment(system: "Mac OS X", architecture: "arm64", lanIP: "127.0.0.1") },
+            dateProvider: { Date(timeIntervalSince1970: 0) },
+            transport: StubHandshakeTransport(data: Data("private-response".utf8), response: response)
+        )
+
+        do {
+            _ = try await client.perform()
+            XCTFail("expected HTTP failure")
+        } catch let error as CainiaoHandshakeError {
+            XCTAssertEqual(error, .httpStatus(503))
+            XCTAssertEqual(error.category, "http-status")
+        }
+    }
+
+    func testHandshakeCoordinatorCoalescesConcurrentTriggers() async {
+        let counter = LockedIntBox()
+        let coordinator = NativeHandshakeCoordinator(
+            operation: {
+                counter.increment()
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                return CainiaoHandshakeSuccess(statusCode: 200)
+            },
+            sleep: { _ in }
+        )
+
+        async let first = coordinator.trigger(reason: .startup)
+        async let second = coordinator.trigger(reason: .wake)
+        let states = await [first, second]
+
+        XCTAssertEqual(states, [.ready(statusCode: 200), .ready(statusCode: 200)])
+        XCTAssertEqual(counter.value, 1)
+    }
+
+    func testHandshakeCoordinatorRetriesAndRedactsFailureCategory() async {
+        let counter = LockedIntBox()
+        let collector = HandshakeEventCollector()
+        let coordinator = NativeHandshakeCoordinator(
+            operation: {
+                counter.increment()
+                throw CainiaoHandshakeError.invalidResponse
+            },
+            sleep: { _ in },
+            eventSink: { collector.append($0) }
+        )
+
+        let state = await coordinator.trigger(reason: .manualRestart)
+
+        XCTAssertEqual(state, .failed(category: "invalid-response"))
+        XCTAssertEqual(counter.value, 3)
+        XCTAssertEqual(collector.events.last?.state, .failed(category: "invalid-response"))
+    }
+
+    func testHandshakeResultOnlyAppliesToCurrentRunningServiceGeneration() async {
+        let results = await MainActor.run {
+            (
+                current: AppModel.shouldApplyNativeHandshakeResult(
+                    generation: 4,
+                    currentGeneration: 4,
+                    serviceState: .running
+                ),
+                stale: AppModel.shouldApplyNativeHandshakeResult(
+                    generation: 3,
+                    currentGeneration: 4,
+                    serviceState: .running
+                ),
+                stopped: AppModel.shouldApplyNativeHandshakeResult(
+                    generation: 4,
+                    currentGeneration: 4,
+                    serviceState: .stopped
+                )
+            )
+        }
+
+        XCTAssertTrue(results.current)
+        XCTAssertFalse(results.stale)
+        XCTAssertFalse(results.stopped)
+    }
+
+    func testLocalTLSIdentityGeneratesAndReusesIndependentMaterial() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("printark-local-tls-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = LocalTLSIdentityManager(directory: directory)
+
+        let first = try manager.loadOrCreate()
+        let second = try manager.loadOrCreate()
+
+        XCTAssertEqual(first, second)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.certificatePath))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.privateKeyPath))
+        let attributes = try FileManager.default.attributesOfItem(atPath: first.privateKeyPath)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+
+        let inspection = try runTestProcess(
+            executable: "/usr/bin/openssl",
+            arguments: ["x509", "-in", first.certificatePath, "-noout", "-text"]
+        )
+        XCTAssertEqual(inspection.status, 0)
+        XCTAssertTrue(inspection.output.contains("DNS:localhost"))
+        XCTAssertTrue(inspection.output.contains("IP Address:127.0.0.1"))
+    }
+
     func testRuntimeModeMapsToNativeConfiguration() {
         let settings = PrintSettings(printerName: "TAOBAO", media: "100x180mm", dryRun: true, fitToPage: true, dedupe: true, dedupeWindowMinutes: 10)
         let preview = PrintServiceConfiguration.current(runtimeMode: .defaultPreview, autoOpenPreview: false, printSettings: settings)
@@ -456,37 +650,22 @@ final class PrintArkTests: XCTestCase {
         XCTAssertEqual(sorted.map(\.name), ["TAOBAO", "HP Smart Tank"])
     }
 
-    func testCainiaoPortOwnerDetection() {
-        let officialJava = PortOccupancy(
-            port: 13529,
-            pid: 123,
-            processName: "java",
-            commandLine: "jre/bin/java -jar Xprint.xjar"
-        )
-        let officialLauncher = PortOccupancy(
-            port: 13528,
-            pid: 124,
-            processName: "cainiao-x-print",
-            commandLine: "/Applications/cainiao-x-print.app/Contents/MacOS/cainiao-x-print"
-        )
+    func testPortOccupancyIsSurfacedWithoutControllingTheOwner() {
         let unknown = PortOccupancy(
             port: 13525,
             pid: 125,
-            processName: "node",
-            commandLine: "node server.js"
+            processName: "node"
         )
 
-        XCTAssertTrue(officialJava.isKnownCainiaoComponent)
-        XCTAssertTrue(officialLauncher.isKnownCainiaoComponent)
-        XCTAssertFalse(unknown.isKnownCainiaoComponent)
+        XCTAssertEqual(unknown.displayText, "13525: node (125)")
 
         let occupied = PortStatus(
-            id: 13529,
-            port: 13529,
-            label: "WSS",
+            id: 13525,
+            port: 13525,
+            label: "HTTP",
             isListening: false,
             listenerCount: 1,
-            ownerDescription: officialJava.displayText
+            ownerDescription: unknown.displayText
         )
         XCTAssertEqual(occupied.stateText, "占用")
     }
@@ -903,6 +1082,80 @@ private extension URLRequest {
         self.init(url: url)
         httpMethod = method
     }
+}
+
+private func parseFormBody(_ body: String) -> [String: String] {
+    Dictionary(uniqueKeysWithValues: body.split(separator: "&").compactMap { pair in
+        let pieces = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count == 2 else { return nil }
+        let key = String(pieces[0]).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? ""
+        let value = String(pieces[1]).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? ""
+        return (key, value)
+    })
+}
+
+private struct FixedHandshakeIdentityProvider: CainiaoMachineIdentityProviding {
+    func resolve() -> CainiaoMachineIdentity {
+        CainiaoMachineIdentity(guid: "guid", macAddress: "02:00:00:00:00:01")
+    }
+}
+
+private struct StubHandshakeTransport: CainiaoHandshakeTransport {
+    var data = Data(#"{"cainiao_waybillprint_clientupdate_getconfig_response":{"result":{"data":{}}}}"#.utf8)
+    var response = HTTPURLResponse(
+        url: CainiaoHandshakeRequestBuilder.endpoint,
+        statusCode: 200,
+        httpVersion: nil,
+        headerFields: nil
+    )!
+
+    func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        (data, response)
+    }
+}
+
+private final class LockedIntBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    func increment() {
+        lock.withLock { storage += 1 }
+    }
+
+    var value: Int {
+        lock.withLock { storage }
+    }
+}
+
+private final class HandshakeEventCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [NativeHandshakeEvent] = []
+
+    func append(_ event: NativeHandshakeEvent) {
+        lock.withLock { storage.append(event) }
+    }
+
+    var events: [NativeHandshakeEvent] {
+        lock.withLock { storage }
+    }
+}
+
+private struct TestProcessResult {
+    let status: Int32
+    let output: String
+}
+
+private func runTestProcess(executable: String, arguments: [String]) throws -> TestProcessResult {
+    let process = Process()
+    let output = Pipe()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardOutput = output
+    process.standardError = output
+    try process.run()
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return TestProcessResult(status: process.terminationStatus, output: String(decoding: data, as: UTF8.self))
 }
 
 private final class LockedResultBox: @unchecked Sendable {

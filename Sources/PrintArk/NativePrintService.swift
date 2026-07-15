@@ -10,58 +10,12 @@ import NIOPosix
 import NIOWebSocket
 import PDFKit
 
-struct WSSCertificateMaterial: Sendable, Equatable {
-    var certificatePath: String
-    var privateKeyPath: String
-
-    static func discover() -> WSSCertificateMaterial? {
-        let supportDirectory = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Application Support/PrintArk/cainiao-wss", isDirectory: true)
-        let cached = WSSCertificateMaterial(
-            certificatePath: supportDirectory.appendingPathComponent("server.crt").path,
-            privateKeyPath: supportDirectory.appendingPathComponent("server.key").path
-        )
-        if FileManager.default.fileExists(atPath: cached.certificatePath),
-           FileManager.default.fileExists(atPath: cached.privateKeyPath) {
-            return cached
-        }
-
-        let officialJar = "/Applications/cainiao-x-print.app/Contents/Resources/Xprint.xjar"
-        guard FileManager.default.fileExists(atPath: officialJar) else { return nil }
-        do {
-            try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
-            try extractFromZip(zipPath: officialJar, entry: "ca/server.crt", to: URL(fileURLWithPath: cached.certificatePath))
-            try extractFromZip(zipPath: officialJar, entry: "ca/server.key", to: URL(fileURLWithPath: cached.privateKeyPath))
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cached.privateKeyPath)
-            return cached
-        } catch {
-            return nil
-        }
-    }
-
-    private static func extractFromZip(zipPath: String, entry: String, to destination: URL) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-p", zipPath, entry]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        try process.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0, !data.isEmpty else {
-            throw CocoaError(.fileReadUnknown)
-        }
-        try data.write(to: destination, options: .atomic)
-    }
-}
-
 struct PrintServiceConfiguration: Sendable {
     var host: String = "127.0.0.1"
     var webSocketPort = 13528
     var secureWebSocketPort = 13529
     var httpPort = 13525
-    var wssCertificateMaterial: WSSCertificateMaterial? = WSSCertificateMaterial.discover()
+    var wssCertificateMaterial: WSSCertificateMaterial? = WSSCertificateMaterial.loadOrCreate()
     var runtimeMode: RuntimeMode
     var autoOpenPreview: Bool
     var printSettings: PrintSettings
@@ -115,16 +69,10 @@ struct PortOccupancy: Equatable {
     let port: Int
     let pid: Int
     let processName: String
-    let commandLine: String
 
     var displayText: String {
         let name = processName.isEmpty ? "pid \(pid)" : processName
         return "\(port): \(name) (\(pid))"
-    }
-
-    var isKnownCainiaoComponent: Bool {
-        let text = "\(processName) \(commandLine)".lowercased()
-        return text.contains("cainiao-x-print") || text.contains("xprint.xjar")
     }
 }
 
@@ -241,8 +189,7 @@ final class NativePrintService: @unchecked Sendable {
                         results.append(PortOccupancy(
                             port: port,
                             pid: pid,
-                            processName: currentName,
-                            commandLine: processCommandLine(pid: pid)
+                            processName: currentName
                         ))
                     }
                 default:
@@ -260,15 +207,6 @@ final class NativePrintService: @unchecked Sendable {
             }
             .map(\.displayText)
             .joined(separator: ", ")
-    }
-
-    private static func processCommandLine(pid: Int) -> String {
-        let output = runProcess(
-            executable: "/bin/ps",
-            arguments: ["-p", "\(pid)", "-o", "command="]
-        )
-        guard output.exitCode == 0 else { return "" }
-        return output.output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func runProcess(executable: String, arguments: [String]) -> (exitCode: Int32, output: String) {
@@ -304,6 +242,28 @@ final class NativePrintService: @unchecked Sendable {
         appendLog(line)
     }
 
+    func appendNativeHandshakeEvent(_ event: NativeHandshakeEvent) {
+        var fields: [String: JSONValue] = [
+            "reason": .string(event.reason.rawValue),
+            "attempt": .number(Double(event.attempt)),
+        ]
+        switch event.state {
+        case .idle:
+            fields["phase"] = .string("idle")
+        case .running:
+            fields["phase"] = .string("running")
+        case let .ready(statusCode):
+            fields["phase"] = .string("ready")
+            fields["statusCode"] = .number(Double(statusCode))
+        case let .failed(category):
+            fields["phase"] = .string("failed")
+            fields["errorCategory"] = .string(category)
+        case .credentialsMissing:
+            fields["phase"] = .string("credentials-missing")
+        }
+        emit("native-handshake", fields)
+    }
+
     func start(configuration newConfiguration: PrintServiceConfiguration) -> CommandResult {
         lock.withLock {
             configuration = newConfiguration
@@ -319,7 +279,7 @@ final class NativePrintService: @unchecked Sendable {
             newConfiguration.secureWebSocketPort,
             newConfiguration.httpPort,
         ]
-        let unresolvedOccupancies = releaseKnownCainiaoPortOwnersIfNeeded(ports: desiredPorts)
+        let unresolvedOccupancies = Self.portOccupancies(ports: desiredPorts)
         if !unresolvedOccupancies.isEmpty {
             let message = "端口被其他程序占用：\(Self.describeOccupancies(unresolvedOccupancies))"
             appendLog("Native service start blocked: \(message)")
@@ -477,36 +437,6 @@ final class NativePrintService: @unchecked Sendable {
             calibration: settings.calibration
         )
         return true
-    }
-
-    private func releaseKnownCainiaoPortOwnersIfNeeded(ports: [Int]) -> [PortOccupancy] {
-        let occupancies = Self.portOccupancies(ports: ports)
-        guard !occupancies.isEmpty else { return [] }
-
-        let unknown = occupancies.filter { !$0.isKnownCainiaoComponent }
-        guard unknown.isEmpty else { return occupancies }
-
-        appendLog("Official Cainiao component is occupying local print ports; terminating before PrintArk starts: \(Self.describeOccupancies(occupancies))")
-        let pids = Set(occupancies.map(\.pid))
-        for pid in pids {
-            kill(pid_t(pid), SIGTERM)
-        }
-        Thread.sleep(forTimeInterval: 0.8)
-
-        var remaining = Self.portOccupancies(ports: ports)
-        let stillOfficial = remaining.filter(\.isKnownCainiaoComponent)
-        if !stillOfficial.isEmpty {
-            for pid in Set(stillOfficial.map(\.pid)) {
-                kill(pid_t(pid), SIGKILL)
-            }
-            Thread.sleep(forTimeInterval: 0.4)
-            remaining = Self.portOccupancies(ports: ports)
-        }
-
-        if remaining.isEmpty {
-            appendLog("Released official Cainiao port owner; PrintArk will bind local print ports")
-        }
-        return remaining
     }
 
     private func portStatus(port: Int, label: String, isListening: Bool, occupancies: [PortOccupancy]) -> PortStatus {

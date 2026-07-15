@@ -74,6 +74,9 @@ jobs:
 
       # build_and_run.sh 默认会启动 .app;CI 用 build 模式只打包不运行。
       - name: Build .app bundle
+        env:
+          PRINTARK_CAINIAO_APP_KEY: ${{ secrets.PRINTARK_CAINIAO_APP_KEY }}
+          PRINTARK_CAINIAO_APP_SECRET: ${{ secrets.PRINTARK_CAINIAO_APP_SECRET }}
         run: ./script/build_and_run.sh build
 
       # Release 资产必须是文件;.app 是目录,压缩成 zip(保留符号链接/权限用 ditto)。
@@ -113,6 +116,10 @@ jobs:
             spm-${{ runner.os }}-
 
       - name: Build .app bundle
+        env:
+          PRINTARK_CAINIAO_APP_KEY: ${{ secrets.PRINTARK_CAINIAO_APP_KEY }}
+          PRINTARK_CAINIAO_APP_SECRET: ${{ secrets.PRINTARK_CAINIAO_APP_SECRET }}
+          PRINTARK_REQUIRE_CAINIAO_CREDENTIALS: "1"
         run: ./script/build_and_run.sh build
 
       # 资产名带版本号(取自 tag,如 PrintArk-v1.1.0.app.zip),便于区分各版本产物。
@@ -140,6 +147,7 @@ jobs:
                sudo xattr -cr /Applications/PrintArk.app
                ```
             4. 然后正常双击打开即可。
+            5. 首次打开后，在「版本信息 → 服务信息」点击「安装本机证书」，完成一次本机 WSS 信任设置。
 
             ### ⚠️ 为什么会提示「已损坏,无法打开」
 
@@ -151,5 +159,4 @@ jobs:
             ### 改动明细
 
             <!-- 以下为本版本相对上一 tag 的提交与 PR 自动汇总 -->
-
 
