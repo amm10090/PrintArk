@@ -101,8 +101,11 @@ private func makeSecureWebSocketBootstrap(group: MultiThreadedEventLoopGroup, se
         .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
         .childChannelInitializer { channel in
             let tlsHandler = NIOSSLServerHandler(context: sslContext)
-            return channel.pipeline.addHandler(tlsHandler).flatMap {
-                configureCainiaoWebSocketPipeline(channel: channel, service: service)
+            do {
+                try channel.pipeline.syncOperations.addHandler(tlsHandler)
+                return configureCainiaoWebSocketPipeline(channel: channel, service: service)
+            } catch {
+                return channel.eventLoop.makeFailedFuture(error)
             }
         }
         .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
