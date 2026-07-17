@@ -24,6 +24,16 @@ enum LocalTLSTrustState: Equatable, Sendable {
         case .failed: return "本机证书状态异常"
         }
     }
+
+    /// 版本页健康状态行的颜色语义。
+    var health: HealthStatusRow.Health {
+        switch self {
+        case .missing: return .error
+        case .untrusted: return .warning
+        case .trusted: return .ok
+        case .failed: return .error
+        }
+    }
 }
 
 struct LocalTLSTrustInstallResult: Equatable, Sendable {

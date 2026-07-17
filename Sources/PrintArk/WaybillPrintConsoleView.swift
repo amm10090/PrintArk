@@ -1861,57 +1861,77 @@ struct VersionSummaryCard: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            SettingsCard(title: "版本信息", subtitle: "当前 App 版本与系统要求。") {
-                VStack(alignment: .leading, spacing: 9) {
-                    DedupKeyRow("版本号：v\(AppInfo.version)")
-                    DedupKeyRow("构建日期：\(AppInfo.buildDate)")
-                    DedupKeyRow("系统要求：macOS 13 或更高")
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            VersionHeroCard()
 
             UpdateCheckCard(updater: updater, autoCheckUpdate: $autoCheckUpdate)
 
             SettingsCard(title: "服务信息", subtitle: "本机服务监听端口与协议兼容版本。") {
-                VStack(alignment: .leading, spacing: 10) {
-                    DedupKeyRow("WebSocket 端口：13528")
-                    DedupKeyRow("安全 WebSocket 端口：13529")
-                    DedupKeyRow("HTTP 预览端口：13525")
-                    DedupKeyRow("协议兼容版本：1.5.3.0")
-                    DedupKeyRow("远端握手：\(model.nativeHandshakeState.displayText)")
-                    DedupKeyRow("安全证书：\(model.localTLSTrustState.displayText)")
-
-                    if model.localTLSTrustState != .trusted {
-                        Button(action: model.installLocalTLSCertificate) {
-                            Label(
-                                model.isInstallingLocalTLSCertificate ? "正在安装" : "安装本机证书",
-                                systemImage: "checkmark.shield"
-                            )
-                        }
-                        .disabled(model.isInstallingLocalTLSCertificate)
-                    }
+                VStack(spacing: 0) {
+                    InfoKeyValueRow("WebSocket 端口", "13528", icon: "network")
+                    InfoDivider()
+                    InfoKeyValueRow("安全 WebSocket 端口", "13529", icon: "lock.shield")
+                    InfoDivider()
+                    InfoKeyValueRow("HTTP 预览端口", "13525", icon: "doc.richtext")
+                    InfoDivider()
+                    InfoKeyValueRow("协议兼容版本", "1.5.3.0", icon: "checkmark.seal")
+                    InfoDivider()
+                    HealthStatusRow(
+                        title: "远端握手",
+                        detail: model.nativeHandshakeState.displayText,
+                        health: model.nativeHandshakeState.health
+                    )
+                    InfoDivider()
+                    HealthStatusRow(
+                        title: "安全证书",
+                        detail: model.localTLSTrustState.displayText,
+                        health: model.localTLSTrustState.health
+                    )
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if model.localTLSTrustState != .trusted {
+                    Button(action: model.installLocalTLSCertificate) {
+                        Label(
+                            model.isInstallingLocalTLSCertificate ? "正在安装" : "安装本机证书",
+                            systemImage: "checkmark.shield"
+                        )
+                    }
+                    .disabled(model.isInstallingLocalTLSCertificate)
+                    .padding(.top, 12)
+                }
             }
 
             SettingsCard(title: "功能说明", subtitle: "本版要点。") {
-                VStack(alignment: .leading, spacing: 9) {
-                    DedupKeyRow("打印机校准（偏移 / 旋转 / 缩放）")
-                    DedupKeyRow("面单字段字号自定义")
-                    DedupKeyRow("打印队列卡片化")
-                    DedupKeyRow("自适应纸张")
-                    DedupKeyRow("失败任务重试")
+                let features: [(String, String)] = [
+                    ("scope", "打印机校准（偏移 / 旋转 / 缩放）"),
+                    ("textformat.size", "面单字段字号自定义"),
+                    ("square.stack.3d.up", "打印队列卡片化"),
+                    ("arrow.up.left.and.arrow.down.right", "自适应纸张"),
+                    ("arrow.clockwise.circle", "失败任务重试"),
+                ]
+                VStack(spacing: 10) {
+                    ForEach(features, id: \.1) { icon, text in
+                        FeatureRow(icon: icon, text: text)
+                    }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             SettingsCard(title: "运行状态", subtitle: "当前本机服务。") {
-                VStack(alignment: .leading, spacing: 9) {
-                    DedupKeyRow("服务：\(model.serviceState.title)")
-                    DedupKeyRow("连接：\(model.activeBrowserConnections)")
-                    DedupKeyRow("最新预览：\(model.latestPreviewPDF?.lastPathComponent ?? "-")")
+                VStack(spacing: 0) {
+                    HealthStatusRow(
+                        title: "服务",
+                        detail: model.serviceState.title,
+                        health: model.serviceState.health
+                    )
+                    InfoDivider()
+                    InfoKeyValueRow("浏览器连接", "\(model.activeBrowserConnections)", icon: "point.3.connected.trianglepath.dotted")
+                    InfoDivider()
+                    InfoKeyValueRow(
+                        "最新预览",
+                        model.latestPreviewPDF?.lastPathComponent ?? "-",
+                        icon: "doc.text.magnifyingglass",
+                        monospaced: true
+                    )
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             SettingsCard(title: "调试选项", subtitle: "仅供开发调试，正常使用请保持关闭。") {
@@ -1947,6 +1967,175 @@ struct VersionSummaryCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+}
+
+/// 版本页顶部主视觉：应用图标 + 名称 + 版本徽章 + 构建日期 / 系统要求。
+private struct VersionHeroCard: View {
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: "printer.fill")
+                .font(.system(size: 30, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 60, height: 60)
+                .background(
+                    LinearGradient(
+                        colors: [Color.accentColor, Color.accentColor.opacity(0.72)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                )
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text("PrintArk")
+                        .font(.title2.weight(.bold))
+
+                    Text("v\(AppInfo.version)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.accentColor.opacity(0.14), in: Capsule())
+                }
+
+                Text("菜单栏面单打印服务")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 14) {
+                    Label(AppInfo.buildDate, systemImage: "calendar")
+                    Label("macOS 13+", systemImage: "laptopcomputer")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(18)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.primary.opacity(0.08))
+        }
+    }
+}
+
+/// 中性键值行：左侧图标 + 标题，右侧取值（不带健康语义，不用绿勾）。
+private struct InfoKeyValueRow: View {
+    let title: String
+    let value: String
+    let icon: String
+    let monospaced: Bool
+
+    init(_ title: String, _ value: String, icon: String, monospaced: Bool = false) {
+        self.title = title
+        self.value = value
+        self.icon = icon
+        self.monospaced = monospaced
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+
+            Text(title)
+                .font(.subheadline)
+
+            Spacer(minLength: 12)
+
+            Text(value)
+                .font(monospaced ? .system(.subheadline, design: .monospaced) : .subheadline)
+                .fontWeight(.medium)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+/// 健康状态行：彩色圆点反映真实状态（正常绿 / 进行中橙 / 异常红 / 中性灰）。
+struct HealthStatusRow: View {
+    enum Health {
+        case ok, pending, warning, error, neutral
+
+        var color: Color {
+            switch self {
+            case .ok: return StatusMenuStyle.green
+            case .pending: return StatusMenuStyle.orange
+            case .warning: return StatusMenuStyle.orange
+            case .error: return StatusMenuStyle.red
+            case .neutral: return StatusMenuStyle.gray
+            }
+        }
+    }
+
+    let title: String
+    let detail: String
+    let health: Health
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(health.color)
+                .frame(width: 8, height: 8)
+                .overlay(Circle().fill(health.color.opacity(0.28)).frame(width: 15, height: 15))
+                .frame(width: 18)
+
+            Text(title)
+                .font(.subheadline)
+
+            Spacer(minLength: 12)
+
+            Text(detail)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(health == .neutral ? Color.secondary : health.color)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+/// 功能要点行：主题色勾选图标 + 说明文字（表示「已支持」，语义上勾选合理）。
+private struct FeatureRow: View {
+    let icon: String
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22, height: 22)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+            Text(text)
+                .font(.subheadline)
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "checkmark")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(StatusMenuStyle.green)
+        }
+    }
+}
+
+/// 信息行之间的细分隔线。
+private struct InfoDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.06))
+            .frame(height: 1)
     }
 }
 

@@ -324,6 +324,17 @@ enum NativeHandshakeState: Equatable, Sendable {
         case .credentialsMissing: return "远端握手凭据缺失"
         }
     }
+
+    /// 版本页健康状态行的颜色语义。
+    var health: HealthStatusRow.Health {
+        switch self {
+        case .idle: return .neutral
+        case .running: return .pending
+        case .ready: return .ok
+        case .failed: return .error
+        case .credentialsMissing: return .warning
+        }
+    }
 }
 
 struct NativeHandshakeEvent: Equatable, Sendable {

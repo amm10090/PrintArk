@@ -68,7 +68,7 @@ enum SettingsMigration {
 /// build 脚本的 Info.plist（CFBundleShortVersionString）需人工对齐同一字面。
 /// 注意：协议伪装字段（getAgentInfo 的 "1.5.3.0"）不是 App 版本，与此无关。
 enum AppInfo {
-    static let version = "1.1.13"
+    static let version = "1.1.14"
 
     /// 构建日期（本地化短日期）。以可执行文件的修改时间作为编译期代理——
     /// `.app` 包与 `swift run` 都能取到，无需编译期注入宏。
@@ -168,6 +168,16 @@ enum ServiceState: String {
         case .running: return "printer.fill"
         case .stopping: return "stop.circle"
         case .error: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    /// 版本页健康状态行的颜色语义。
+    var health: HealthStatusRow.Health {
+        switch self {
+        case .stopped: return .neutral
+        case .starting, .stopping: return .pending
+        case .running: return .ok
+        case .error: return .error
         }
     }
 }
