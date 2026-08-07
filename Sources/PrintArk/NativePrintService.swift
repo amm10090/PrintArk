@@ -1710,8 +1710,8 @@ final class NativeWaybillRenderer: @unchecked Sendable {
         drawTemplateText(values.blockCode, x: 49.89, y: 38.58, width: 18.67, height: 6.42, size: 4.5, valign: .middle)
 
         drawTemplateText("收", x: 5.4, y: 37.97, width: 7, height: 7, size: 5.8, weight: .bold, align: .center, valign: .middle)
-        drawTemplateText("寄", x: 5.1, y: 51.03, width: 6, height: 6, size: 4.8, weight: .bold, align: .center, valign: .middle)
-        drawTemplateText("验", x: 5.44, y: 62.92, width: 4, height: 4, size: 3.2, weight: .bold, align: .center, valign: .middle)
+        drawTemplateText("收", x: 5.1, y: 51.03, width: 6, height: 6, size: 4.8, weight: .bold, align: .center, valign: .middle)
+        drawTemplateText("寄", x: 5.44, y: 62.92, width: 4, height: 4, size: 3.2, weight: .bold, align: .center, valign: .middle)
 
         [
             (5.35, 12, 70, 12),
