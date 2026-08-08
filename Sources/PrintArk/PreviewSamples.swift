@@ -80,7 +80,7 @@ enum PreviewSamples {
             model.printJobs = []
             model.redactedLogs = ""
             model.lastActionOutput = "等待启动本机服务"
-            model.printerDevices = [.fallback]
+            model.printerDevices = []
         case .starting:
             model.serviceState = .starting
             model.serviceSummary = "启动中 · 正在检查本机端口"

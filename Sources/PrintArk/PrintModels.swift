@@ -166,6 +166,8 @@ struct PrinterDevice: Identifiable, Hashable {
         return name
     }
 
+    /// Cainiao protocol compatibility fallback. Desktop UI lists are populated
+    /// from CUPS discovery and must not use this value as a visible row.
     static let fallback = PrinterDevice(name: "TAOBAO", isDefault: true, isEnabled: true)
 }
 

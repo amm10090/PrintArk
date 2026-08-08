@@ -650,6 +650,18 @@ final class PrintArkTests: XCTestCase {
         XCTAssertEqual(sorted.map(\.name), ["TAOBAO", "HP Smart Tank"])
     }
 
+    func testSnapshotPrinterDevicesDoNotInjectConfiguredFallback() {
+        let service = NativePrintService()
+        var settings = PrintSettings.current
+        let missingQueue = "PrintArk-Missing-\(UUID().uuidString)"
+        settings.printerName = missingQueue
+        service.updateConfiguration(settings)
+
+        let printers = service.snapshot(forcePrinterRefresh: true).printerDevices
+
+        XCTAssertFalse(printers.contains(where: { $0.name == missingQueue }))
+    }
+
     func testPortOccupancyIsSurfacedWithoutControllingTheOwner() {
         let unknown = PortOccupancy(
             port: 13525,

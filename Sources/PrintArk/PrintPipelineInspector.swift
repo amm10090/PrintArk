@@ -13,18 +13,28 @@ struct PrintPipelineInspector: View {
     @AppStorage(SettingsKeys.printHideBorder) private var hideBorder = true
 
     private var printers: [PrinterDevice] {
-        var devices = model.printerDevices
-        if devices.isEmpty {
-            devices = [.fallback]
-        }
-        if !devices.contains(where: { $0.name == printerName }) {
-            devices.insert(PrinterDevice(name: printerName.isEmpty ? "TAOBAO" : printerName, isDefault: false, isEnabled: true), at: 0)
-        }
-        return devices
+        model.printerDevices
     }
 
-    private var selectedPrinter: PrinterDevice {
-        printers.first(where: { $0.name == printerName }) ?? .fallback
+    private var selectedPrinter: PrinterDevice? {
+        printers.first {
+            $0.name.compare(printerName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }
+    }
+
+    /// Keep the persisted setting aligned with the exact CUPS queue name.
+    /// CUPS names are case-sensitive when passed to `lpr`, while older
+    /// protocol settings may still contain the compatibility spelling
+    /// `TAOBAO`.
+    private func synchronizePrinterSelection() {
+        guard !printers.isEmpty else { return }
+
+        let target = selectedPrinter
+            ?? printers.first(where: \.isDefault)
+            ?? printers[0]
+        if printerName != target.name {
+            printerName = target.name
+        }
     }
 
     var body: some View {
@@ -41,7 +51,16 @@ struct PrintPipelineInspector: View {
                 )
                 .onChange(of: printerName) { _ in model.rebakePreviewNow() }
 
-                PrinterCalibrationCard(model: model, printerName: printerName)
+                if let selectedPrinter {
+                    PrinterCalibrationCard(model: model, printerName: selectedPrinter.name)
+                } else {
+                    SettingsCard(title: "打印机校准", subtitle: "选择真实 CUPS 打印机后可设置校准。") {
+                        Text("暂无可校准的 CUPS 打印机。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
 
                 LabelContentCard(
                     model: model,
@@ -57,11 +76,17 @@ struct PrintPipelineInspector: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle("打印设置")
+        .onAppear {
+            synchronizePrinterSelection()
+        }
+        .onChange(of: model.printerDevices) { _ in
+            synchronizePrinterSelection()
+        }
     }
 }
 
 struct PipelineSettingsCard: View {
-    let selectedPrinter: PrinterDevice
+    let selectedPrinter: PrinterDevice?
 
     @Binding var printerName: String
     @Binding var printMedia: String
@@ -85,10 +110,19 @@ struct PipelineSettingsCard: View {
     var body: some View {
         SettingsCard(title: "打印设置", subtitle: "面单的打印机和纸张选项。") {
             VStack(spacing: 14) {
-                Picker("打印机", selection: $printerName) {
-                    ForEach(printers) { printer in
-                        Text(printer.displayName + (printer.isEnabled ? "" : " · 未启用"))
-                            .tag(printer.name)
+                if printers.isEmpty {
+                    HStack {
+                        Text("打印机")
+                        Spacer()
+                        Text("未发现 CUPS 打印机")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Picker("打印机", selection: $printerName) {
+                        ForEach(printers) { printer in
+                            Text(printer.displayName + (printer.isEnabled ? "" : " · 未启用"))
+                                .tag(printer.name)
+                        }
                     }
                 }
 
@@ -96,8 +130,8 @@ struct PipelineSettingsCard: View {
                     Text("启用状态")
                     Spacer()
                     StatusText(
-                        text: selectedPrinter.isEnabled ? "可用" : "不可用",
-                        color: selectedPrinter.isEnabled ? .green : .red
+                        text: selectedPrinter.map { $0.isEnabled ? "可用" : "不可用" } ?? "未选择",
+                        color: selectedPrinter.map { $0.isEnabled ? .green : .red } ?? .secondary
                     )
                 }
 

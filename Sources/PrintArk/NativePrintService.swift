@@ -501,6 +501,9 @@ final class NativePrintService: @unchecked Sendable {
         let portSummary = ports.map { "\($0.label)\($0.stateText)" }.joined(separator: " · ")
         let connectionText = connections == 1 ? "1 个浏览器连接" : "\(connections) 个浏览器连接"
         let summary = state == .error ? "错误 • \(error)" : "\(state.title) • \(portSummary) • \(connectionText)"
+        // The desktop settings UI must show only queues discovered from CUPS.
+        // Protocol compatibility fallbacks are added separately by
+        // `discoverProtocolPrinters()` and must not leak into the UI snapshot.
         let printers = printerDevices(defaultPrinterName: config.printSettings.printerName, forceRefresh: forcePrinterRefresh)
         let latest = latestPreviewPDF
         let token = SupervisorSnapshotToken(
@@ -1269,7 +1272,7 @@ final class NativePrintService: @unchecked Sendable {
             return cached
         }
 
-        let devices = discoverPrinterDevices(defaultPrinterName: defaultPrinterName)
+        let devices = discoverPrinterDevices(defaultPrinterName: defaultPrinterName, includeFallback: false)
         lock.withLock {
             cachedPrinterDevices = devices
             cachedPrinterDevicesAt = now
@@ -2203,7 +2206,7 @@ private func sanitizePrinterName(_ raw: String) -> String {
     return cleaned.isEmpty ? raw : cleaned
 }
 
-private func discoverPrinterDevices(defaultPrinterName configuredDefault: String) -> [PrinterDevice] {
+private func discoverPrinterDevices(defaultPrinterName configuredDefault: String, includeFallback: Bool) -> [PrinterDevice] {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/lpstat")
     process.arguments = ["-p", "-d"]
@@ -2214,7 +2217,9 @@ private func discoverPrinterDevices(defaultPrinterName configuredDefault: String
         try process.run()
         process.waitUntilExit()
     } catch {
-        return [PrinterDevice(name: configuredDefault, isDefault: true, isEnabled: true)]
+        return includeFallback
+            ? [PrinterDevice(name: configuredDefault, isDefault: true, isEnabled: true)]
+            : []
     }
 
     let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -2242,7 +2247,7 @@ private func discoverPrinterDevices(defaultPrinterName configuredDefault: String
             devices.append(PrinterDevice(name: name, isDefault: name == defaultPrinter, isEnabled: enabled))
         }
     }
-    if !devices.contains(where: { $0.name == configuredDefault }) {
+    if includeFallback && !devices.contains(where: { $0.name == configuredDefault }) {
         devices.insert(PrinterDevice(name: configuredDefault, isDefault: devices.isEmpty, isEnabled: true), at: 0)
     }
     return devices
@@ -2250,7 +2255,10 @@ private func discoverPrinterDevices(defaultPrinterName configuredDefault: String
 
 private func discoverProtocolPrinters() -> [PrinterDevice] {
     let configName = PrintSettings.current.printerName
-    return prioritizeProtocolPrinters(discoverPrinterDevices(defaultPrinterName: configName), preferredName: configName)
+    return prioritizeProtocolPrinters(
+        discoverPrinterDevices(defaultPrinterName: configName, includeFallback: true),
+        preferredName: configName
+    )
 }
 
 private func defaultPrinterName(from printers: [PrinterDevice]) -> String {
