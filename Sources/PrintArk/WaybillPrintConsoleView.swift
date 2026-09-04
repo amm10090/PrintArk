@@ -18,6 +18,7 @@ struct WaybillPrintConsoleView: View {
 enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
     case currentWaybill
     case printQueue
+    case logs
     case currentVersion
     case retryFailed
 
@@ -27,6 +28,7 @@ enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .currentWaybill: return "当前面单"
         case .printQueue: return "打印队列"
+        case .logs: return "运行日志"
         case .currentVersion: return "当前版本"
         case .retryFailed: return "失败重试"
         }
@@ -36,6 +38,7 @@ enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .currentWaybill: return "doc.text"
         case .printQueue: return "tray.full"
+        case .logs: return "text.alignleft"
         case .currentVersion: return "info.circle"
         case .retryFailed: return "arrow.triangle.2.circlepath"
         }
@@ -43,13 +46,14 @@ enum PrintSidebarDestination: String, CaseIterable, Identifiable, Hashable {
 
     var isImplemented: Bool {
         switch self {
-        case .currentWaybill, .printQueue, .currentVersion, .retryFailed:
+        case .currentWaybill, .printQueue, .logs, .currentVersion, .retryFailed:
             return true
         }
     }
 
     static let printItems: [Self] = [.currentWaybill, .printQueue]
     static let batchItems: [Self] = [.retryFailed]
+    static let diagnosticItems: [Self] = [.logs]
     static let infoItems: [Self] = [.currentVersion]
 }
 
@@ -74,6 +78,14 @@ struct PrintSidebarView: View {
                             .foregroundStyle(item.isImplemented ? .primary : .secondary)
                             .tag(item)
                             .help(item.isImplemented ? item.title : "尚未实现")
+                    }
+                }
+
+                Section("诊断") {
+                    ForEach(PrintSidebarDestination.diagnosticItems) { item in
+                        SidebarRow(item: item)
+                            .tag(item)
+                            .help(item.title)
                     }
                 }
 
@@ -257,6 +269,8 @@ struct PrintWorkspaceContent: View {
             CurrentWaybillWorkspace(model: model)
         case .printQueue:
             PrintQueueWorkspace(model: model)
+        case .logs:
+            LogWorkspace(model: model)
         case .currentVersion:
             SidebarPage(
                 title: "当前版本",
