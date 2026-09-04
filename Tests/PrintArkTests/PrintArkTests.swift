@@ -639,6 +639,29 @@ final class PrintArkTests: XCTestCase {
         XCTAssertEqual(global["notifyOnTaskFailure"] as? Bool, false)
     }
 
+    func testWebSocketAcceptsMultiDocumentSizedFrame() throws {
+        let service = NativePrintService()
+        let ports = randomPortPair()
+        let config = testConfiguration(wsPort: ports.ws, httpPort: ports.http, runtimeMode: .defaultPreview)
+
+        XCTAssertEqual(service.start(configuration: config).exitCode, 0)
+        defer { _ = service.stop() }
+
+        let client = try TestWebSocketClient(port: ports.ws)
+        defer { client.close() }
+
+        try client.send([
+            "cmd": "getAgentInfo",
+            "requestID": "RID_LARGE_FRAME",
+            "encryptedDocumentData": String(repeating: "x", count: 20_000),
+        ])
+        let response = try client.receiveJSON()
+
+        XCTAssertEqual(response["cmd"] as? String, "getAgentInfo")
+        XCTAssertEqual(response["requestID"] as? String, "RID_LARGE_FRAME")
+        XCTAssertEqual(response["status"] as? String, "success")
+    }
+
     func testProtocolPrintersPrioritizeTaoBaoForCainiaoCompatibility() {
         let printers = [
             PrinterDevice(name: "HP Smart Tank", isDefault: true, isEnabled: true),

@@ -113,6 +113,9 @@ private func makeSecureWebSocketBootstrap(group: MultiThreadedEventLoopGroup, se
 
 private func configureCainiaoWebSocketPipeline(channel: Channel, service: NativePrintService) -> EventLoopFuture<Void> {
     let upgrader = NIOWebSocketServerUpgrader(
+        // NIO defaults to 16 KiB, while a real multi-document Cainiao print
+        // request carries encrypted label data and can exceed that at 5+ labels.
+        maxFrameSize: 8 * 1024 * 1024,
         shouldUpgrade: { _, _ in
             channel.eventLoop.makeSucceededFuture([:])
         },
