@@ -662,6 +662,36 @@ final class PrintArkTests: XCTestCase {
         XCTAssertEqual(response["status"] as? String, "success")
     }
 
+    func testWebSocketDecoderErrorIsRecordedBeforeConnectionCloses() throws {
+        let service = NativePrintService()
+        let ports = randomPortPair()
+        let config = testConfiguration(wsPort: ports.ws, httpPort: ports.http, runtimeMode: .defaultPreview)
+        let captured = LogCollector()
+        service.setLogSink { line in captured.append(line) }
+
+        XCTAssertEqual(service.start(configuration: config).exitCode, 0)
+        defer { _ = service.stop() }
+
+        let client = try TestWebSocketClient(port: ports.ws)
+        defer { client.close() }
+
+        try client.sendInvalidFragmentedPing()
+        XCTAssertEqual(try client.receiveOpcode(), 0x8)
+
+        let deadline = Date().addingTimeInterval(1)
+        var errorLine: String?
+        repeat {
+            errorLine = captured.lines.last(where: { $0.contains(#""phase":"error""#) })
+            if errorLine == nil {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        } while errorLine == nil && Date() < deadline
+
+        let loggedErrorLine = try XCTUnwrap(errorLine)
+        XCTAssertTrue(loggedErrorLine.contains(#""stage":"websocket-pipeline""#))
+        XCTAssertTrue(loggedErrorLine.contains(#""errorCode":"fragmented-control-frame""#))
+    }
+
     func testProtocolPrintersPrioritizeTaoBaoForCainiaoCompatibility() {
         let printers = [
             PrinterDevice(name: "HP Smart Tank", isDefault: true, isEnabled: true),
@@ -1289,6 +1319,19 @@ private final class TestWebSocketClient {
         frame.append(contentsOf: mask)
         frame.append(contentsOf: data.enumerated().map { index, byte in byte ^ mask[index % 4] })
         try write(frame)
+    }
+
+    func sendInvalidFragmentedPing() throws {
+        let payload = Data("x".utf8)
+        let mask = [UInt8](repeating: 0x37, count: 4)
+        var frame = Data([0x09, 0x80 | UInt8(payload.count)])
+        frame.append(contentsOf: mask)
+        frame.append(contentsOf: payload.enumerated().map { index, byte in byte ^ mask[index % 4] })
+        try write(frame)
+    }
+
+    func receiveOpcode() throws -> UInt8 {
+        try read(count: 2)[0] & 0x0f
     }
 
     func receiveJSON(count: Int) throws -> [[String: Any]] {

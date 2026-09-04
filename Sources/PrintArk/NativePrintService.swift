@@ -10,6 +10,8 @@ import NIOPosix
 import NIOWebSocket
 import PDFKit
 
+private let cainiaoMaxWebSocketFrameSize = 8 * 1024 * 1024
+
 struct PrintServiceConfiguration: Sendable {
     var host: String = "127.0.0.1"
     var webSocketPort = 13528
@@ -115,7 +117,7 @@ private func configureCainiaoWebSocketPipeline(channel: Channel, service: Native
     let upgrader = NIOWebSocketServerUpgrader(
         // NIO defaults to 16 KiB, while a real multi-document Cainiao print
         // request carries encrypted label data and can exceed that at 5+ labels.
-        maxFrameSize: 8 * 1024 * 1024,
+        maxFrameSize: cainiaoMaxWebSocketFrameSize,
         shouldUpgrade: { _, _ in
             channel.eventLoop.makeSucceededFuture([:])
         },
@@ -644,6 +646,31 @@ final class NativePrintService: @unchecked Sendable {
             "reason": .string(reason),
             "activeConnections": .number(Double(count)),
         ])
+    }
+
+    func webSocketPipelineFailed(_ error: Error, remoteAddress: String?) {
+        var fields: [String: JSONValue] = [
+            "phase": .string("error"),
+            "stage": .string("websocket-pipeline"),
+            "message": .string(String(reflecting: error)),
+        ]
+        if let webSocketError = error as? NIOWebSocketError {
+            switch webSocketError {
+            case .invalidFrameLength:
+                fields["errorCode"] = .string("invalid-frame-length")
+                fields["maxFrameBytes"] = .number(Double(cainiaoMaxWebSocketFrameSize))
+            case .fragmentedControlFrame:
+                fields["errorCode"] = .string("fragmented-control-frame")
+            case .multiByteControlFrameLength:
+                fields["errorCode"] = .string("multi-byte-control-frame-length")
+            }
+        } else {
+            fields["errorCode"] = .string("unexpected-pipeline-error")
+        }
+        if let remoteAddress {
+            fields["remoteAddress"] = .string(remoteAddress)
+        }
+        emit("connection", fields)
     }
 
     func servePDF(named rawName: String) -> Data? {
@@ -1325,6 +1352,7 @@ private final class WebSocketProtocolHandler: ChannelInboundHandler, @unchecked 
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
+        service?.webSocketPipelineFailed(error, remoteAddress: remoteAddress)
         context.close(promise: nil)
     }
 
